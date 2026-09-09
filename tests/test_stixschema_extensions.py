@@ -71,11 +71,8 @@ def _extension_bundle():
                     'http-request-ext': {
                         'request_method': 'get',
                         'request_value': '/',
-                        # Real producers frequently emit a scalar for a
-                        # non-repeated header. Projection normalizes that to
-                        # the STIX 2.1 list-of-string value type.
                         'request_header': {
-                            'User-Agent': 'test-agent',
+                            'User-Agent': ['test-agent'],
                         },
                     },
                     'tcp-ext': {
