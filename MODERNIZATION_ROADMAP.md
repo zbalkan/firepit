@@ -106,7 +106,7 @@ firepit/
 
 Complete.
 
-Removed obsolete project scaffolding and migration-era fixtures, including `setup.py`, `setup.cfg`, requirements files, RST/Sphinx documentation, `tox.ini`, the project `Makefile`, `.pylintrc`, old STIX 2.0/conversion fixtures, and unused test helpers. `pyproject.toml` is authoritative.
+Removed obsolete project scaffolding and migration-era fixtures, including `setup.py`, `setup.cfg`, requirements files, RST/Sphinx documentation, `tox.ini`, the project `Makefile`, `.pylintrc`, old STIX 2.0/conversion fixtures, and unused test helpers. Final compatibility-only storage remnants (`batchsize`/catch-all cache arguments and the unused session-existence helper) were removed as well. `pyproject.toml` is authoritative.
 
 ## Dependency burn-down
 
