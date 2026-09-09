@@ -1,5 +1,5 @@
 ===============================
-Firepit - STIX Columnar Storage
+Firepit - STIX Storage for DuckDB
 ===============================
 
 
@@ -10,40 +10,54 @@ Firepit - STIX Columnar Storage
         :target: https://firepit.readthedocs.io/en/latest/?badge=latest
         :alt: Documentation Status
 
-.. image:: https://github.com/opencybersecurityalliance/firepit/actions/workflows/testing.yml/badge.svg
-        :target: https://github.com/opencybersecurityalliance/firepit
-        :alt: Unit Test Status
 
-.. image:: https://codecov.io/gh/opencybersecurityalliance/firepit/branch/develop/graph/badge.svg?token=Pu7pkqmE5W
-        :target: https://codecov.io/gh/opencybersecurityalliance/firepit
+Firepit stores STIX data in DuckDB and is being modernized around DuckDB's
+native analytical and nested data types.
 
-
-Columnar storage for STIX 2.0 observations.
-
+This modernization branch supports CPython 3.11 through 3.14.
 
 * Free software: Apache Software License 2.0
-* Documentation: https://firepit.readthedocs.io.
+* Documentation: https://firepit.readthedocs.io
 
 
-Features
---------
+Current direction
+-----------------
 
-* Transforms STIX Observation SDOs to a columnar format
-* Inserts those transformed observations into SQL (currently sqlite3 and PostgreSQL)
+The original Firepit transformed STIX observations into a relational shape for
+SQLite/PostgreSQL and was primarily designed as the local data store for
+Kestrel.  This branch deliberately narrows that architecture:
+
+* DuckDB is the only database backend.
+* Known STIX 2.1 structure is being moved to native scalar, ``LIST``, ``MAP``,
+  and ``STRUCT`` columns instead of flattened text columns.
+* Complete source objects can be retained as JSON for provenance and unknown or
+  custom properties.
+* STIX-Shifter/remote acquisition belongs in the Python orchestration layer;
+  Firepit is the storage and analytical boundary.
+* DuckDB SQL and optional PRQL are the intended local query languages.
+
+The remaining Kestrel-era compatibility APIs and flattened-schema machinery are
+being retired incrementally.  See ``MODERNIZATION_ROADMAP.md`` for the planned
+cutover and deletion order.
+
 
 Motivation
 ----------
 
-`STIX 2.0 JSON <https://docs.oasis-open.org/cti/stix/v2.0/stix-v2.0-part1-stix-core.html>`_ is a graph-like data format.  There aren't many popular tools for working with graph-like data, but there are numerous tools for working with data from SQL databases.  Firepit attempts to make those tools usable with STIX data obtained from `stix-shifter <https://github.com/opencybersecurityalliance/stix-shifter>`_.
+STIX is a graph-like data model with nested objects and references.  DuckDB can
+represent much of that structure directly while still providing a relational
+analytical interface.  The modernization therefore avoids emulating nested
+STIX structure through backend-portable text columns where DuckDB has a native
+type for the same concept.
 
-Firepit also supports `STIX 2.1 <https://docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html>`_
+The acquisition boundary remains STIX 2.1 JSON.  A separate Python layer can
+use `STIX-Shifter <https://github.com/opencybersecurityalliance/stix-shifter>`_
+to authenticate to remote sources, translate and execute queries, handle
+pagination/retries, and deliver the resulting STIX JSON to Firepit.
 
-Firepit is primarily designed for use with the `Kestrel Threat Hunting Language <https://github.com/opencybersecurityalliance/kestrel-lang>`_.
 
-Credits
+Roadmap
 -------
 
-This package was created with Cookiecutter_ and the `audreyr/cookiecutter-pypackage`_ project template.
-
-.. _Cookiecutter: https://github.com/audreyr/cookiecutter
-.. _`audreyr/cookiecutter-pypackage`: https://github.com/audreyr/cookiecutter-pypackage
+The detailed code-reduction and compatibility-removal plan is maintained in
+`MODERNIZATION_ROADMAP.md <MODERNIZATION_ROADMAP.md>`_.
