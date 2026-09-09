@@ -1,13 +1,13 @@
-"""Validation for SQL identifiers accepted by Firepit."""
+"""Validation for Firepit session names."""
 
 import re
 
-from firepit.exceptions import InvalidViewname
+from firepit.exceptions import InvalidSession
 
-_NAME_RE = re.compile(r"^[\w-]+$")
+_NAME_RE = re.compile(r"^[\w-]+$", re.ASCII)
 
 
 def validate_name(name):
-    """Require a simple identifier before interpolating it into DuckDB SQL."""
+    """Require a simple schema identifier."""
     if not isinstance(name, str) or _NAME_RE.fullmatch(name) is None:
-        raise InvalidViewname(name)
+        raise InvalidSession(name)

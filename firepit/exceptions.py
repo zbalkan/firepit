@@ -1,6 +1,10 @@
 class InvalidObject(Exception):
-    """Input is not valid for the STIX 2.1 storage boundary."""
+    """Input is not valid for the private STIX 2.1 ingestion boundary."""
 
 
-class InvalidViewname(Exception):
-    """A SQL identifier supplied as a table/view/session name is invalid."""
+class InvalidQuery(Exception):
+    """A public Firepit query is not a permitted read-only SELECT."""
+
+
+class InvalidSession(Exception):
+    """A Firepit session/schema name is invalid."""
