@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "firepit"
+version = "2.3.35"
+description = "DuckDB-backed storage and query utilities for STIX data."
+readme = { file = "README.rst", content-type = "text/x-rst" }
+requires-python = ">=3.11,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "IBM Security", email = "pcoccoli@us.ibm.com" },
+]
+keywords = ["stix", "stix-shifter", "duckdb", "threat-hunting"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+]
+dependencies = [
+    "anytree",
+    "duckdb",
+    "ijson",
+    "lark",
+    "python-dateutil",
+    "requests",
+    "tabulate",
+    "typer",
+    "ujson",
+]
+
+[project.optional-dependencies]
+# The experimental async compatibility layer imports pandas at module import
+# time. Keep it out of the core install while that layer is being retired.
+aio = [
+    "pandas",
+]
+test = [
+    "pandas",
+    "pytest>=8",
+    "pytest-asyncio",
+    "pytest-cov",
+    "stix2",
+    "tox>=4",
+]
+lint = [
+    "bandit",
+    "flake8",
+    "pylint",
+    "safety",
+]
+docs = [
+    "Sphinx",
+    "watchdog",
+]
+release = [
+    "build",
+    "twine",
+]
+
+[project.scripts]
+firepit = "firepit.cli:app"
+splint = "firepit.splint:app"
+
+[project.urls]
+Homepage = "https://github.com/opencybersecurityalliance/firepit"
+Documentation = "https://firepit.readthedocs.io"
+Repository = "https://github.com/opencybersecurityalliance/firepit"
+Issues = "https://github.com/opencybersecurityalliance/firepit/issues"
+
+[tool.setuptools]
+include-package-data = true
+zip-safe = false
+
+[tool.setuptools.packages.find]
+include = ["firepit", "firepit.*"]
+
+[tool.setuptools.package-data]
+firepit = ["paramstix.lark"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["firepit"]
