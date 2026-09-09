@@ -26,7 +26,6 @@ classifiers = [
     "Topic :: Security",
 ]
 dependencies = [
-    "anytree",
     "duckdb",
     "ijson",
     "lark",

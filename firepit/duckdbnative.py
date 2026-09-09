@@ -1,4 +1,4 @@
-"""DuckDB-native STIX storage with explicit acquisition provenance."""
+"""DuckDB-native STIX storage with native references and explicit views."""
 
 from __future__ import annotations
 
@@ -16,9 +16,10 @@ from firepit.stix21 import makeid
 from firepit.stixschema import ListType, MapType, StructType
 from firepit.stixschema import rendered_schema, schema_for
 from firepit.validate import validate_name
+from firepit.views import install_views
 
 _NATIVE_META = "duckdb_native_model"
-_NATIVE_VERSION = "3"
+_NATIVE_VERSION = "4"
 _NESTED_PREFIXES = ("MAP(", "STRUCT(")
 
 
@@ -121,6 +122,7 @@ class NativeDuckDBStorage:
         )
         self.connection.execute(f"SET search_path='{self.session_id}'")
         self._prepare_native_model()
+        install_views(self.connection, self.session_id)
 
     def close(self):
         self.connection.close()
@@ -175,23 +177,13 @@ class NativeDuckDBStorage:
             'CREATE TABLE IF NOT EXISTS "raw_run_object" ('
             'query_id VARCHAR, object_id VARCHAR)'
         )
-
-        # Temporary compatibility relations. Phase 4 removes these after all
-        # observation/list-reference queries use native lists directly.
-        self.connection.execute(
-            'CREATE TABLE IF NOT EXISTS "__contains" '
-            '(source_ref VARCHAR, target_ref VARCHAR, x_firepit_rank INTEGER)'
-        )
-        self.connection.execute(
-            'CREATE TABLE IF NOT EXISTS "__reflist" '
-            '(ref_name VARCHAR, source_ref VARCHAR, target_ref VARCHAR)'
-        )
+        # Temporary metadata for the local pattern compatibility adapter. It is
+        # deleted with that adapter in Phase 5/6.
         self.connection.execute(
             'CREATE TABLE IF NOT EXISTS "__columns" '
             '(otype VARCHAR, path VARCHAR, shortname VARCHAR, dtype VARCHAR, '
             ' UNIQUE(otype, path))'
         )
-
         if not row:
             self.connection.execute(
                 'INSERT INTO "__metadata" (name, value) VALUES (?, ?)',
@@ -248,27 +240,6 @@ class NativeDuckDBStorage:
         }
         row["_raw"] = obj
         return row
-
-    @staticmethod
-    def _compat_edges(obj):
-        obj_type = obj.get("type")
-        oid = str(obj.get("id", ""))
-        contains = []
-        reflists = []
-        if obj_type == "observed-data":
-            for ref in obj.get("object_refs", ()):
-                contains.append((oid, str(ref), None))
-        else:
-            for name, refs in obj.items():
-                if not name.endswith("_refs"):
-                    continue
-                if not isinstance(refs, list):
-                    refs = [refs]
-                for ref in refs:
-                    ref = str(ref)
-                    if ref and ref != oid:
-                        reflists.append((name, oid, ref))
-        return contains, reflists
 
     def _insert_rows(self, obj_type, rows, query_id):
         if not rows:
@@ -329,15 +300,12 @@ class NativeDuckDBStorage:
 
     def cache(self, query_id, bundles, batchsize=2000, source=None,
               stix_pattern=None, native_query=None, **_kwargs):
-        """Ingest STIX while keeping acquisition provenance separate from SCOs."""
         if not isinstance(bundles, list):
             bundles = [bundles]
         materialized = [_materialize_bundle(bundle) for bundle in bundles]
         qid = str(query_id) if query_id is not None else None
 
         pending = defaultdict(list)
-        contains = []
-        reflists = []
         object_count = 0
         self.connection.execute("BEGIN")
         try:
@@ -366,9 +334,6 @@ class NativeDuckDBStorage:
                     object_count += 1
                     if "id" in obj:
                         obj["id"] = str(obj["id"])
-                    cedges, redges = self._compat_edges(obj)
-                    contains.extend(cedges)
-                    reflists.extend(redges)
                     pending[obj_type].append(self._project(obj))
                     if len(pending[obj_type]) >= batchsize:
                         self._insert_rows(obj_type, pending[obj_type], qid)
@@ -376,14 +341,6 @@ class NativeDuckDBStorage:
 
             for obj_type, rows in pending.items():
                 self._insert_rows(obj_type, rows, qid)
-            if contains:
-                self.connection.executemany(
-                    'INSERT INTO "__contains" VALUES (?, ?, ?)', contains
-                )
-            if reflists:
-                self.connection.executemany(
-                    'INSERT INTO "__reflist" VALUES (?, ?, ?)', reflists
-                )
             if qid:
                 self.connection.execute(
                     'UPDATE "raw_query" SET completed_at = current_timestamp, '
@@ -391,6 +348,7 @@ class NativeDuckDBStorage:
                     (object_count, qid),
                 )
             self.connection.execute("COMMIT")
+            install_views(self.connection, self.session_id)
         except Exception as exc:
             self.connection.execute("ROLLBACK")
             if qid:
@@ -466,11 +424,9 @@ class NativeDuckDBStorage:
         if offset:
             sql += f" OFFSET {int(offset)}"
         rows = self._query(sql).fetchall()
-        if cols == "*":
-            obj_type = viewname if self._table_exists(viewname) else None
-            if obj_type:
-                for row in rows:
-                    row.setdefault("type", obj_type)
+        if cols == "*" and self._table_exists(viewname):
+            for row in rows:
+                row.setdefault("type", viewname)
         return rows
 
     def values(self, path, viewname):
@@ -491,7 +447,7 @@ class NativeDuckDBStorage:
         sql = (
             f"SELECT v.{_qident(column)} AS {_qident(path)}, COUNT(*) AS count "
             f"FROM {_qident(viewname)} v "
-            f'JOIN "__contains" c ON v.id = c.target_ref '
+            f'JOIN "observed-data" o ON list_contains(o.object_refs, v.id) '
             f'GROUP BY v.{_qident(column)}'
         )
         return self._query(sql).fetchall()
@@ -500,8 +456,7 @@ class NativeDuckDBStorage:
         _, _, column = path.rpartition(":")
         sql = (
             f"SELECT SUM(o.number_observed) AS count FROM {_qident(viewname)} v "
-            f'JOIN "__contains" c ON v.id = c.target_ref '
-            f'JOIN "observed-data" o ON c.source_ref = o.id'
+            f'JOIN "observed-data" o ON list_contains(o.object_refs, v.id)'
         )
         params = []
         if value is not None:
@@ -516,8 +471,7 @@ class NativeDuckDBStorage:
             f"MAX(o.last_observed) AS last_observed, "
             f"SUM(o.number_observed) AS number_observed "
             f"FROM {_qident(viewname)} v "
-            f'JOIN "__contains" c ON v.id = c.target_ref '
-            f'JOIN "observed-data" o ON c.source_ref = o.id'
+            f'JOIN "observed-data" o ON list_contains(o.object_refs, v.id)'
         )
         params = []
         if path and value is not None:
@@ -546,8 +500,7 @@ class NativeDuckDBStorage:
                 projection.append(f"v.{_qident(column)} AS {_qident(item)}")
         sql = (
             f"SELECT {', '.join(projection)} FROM {_qident(viewname)} v "
-            f'JOIN "__contains" c ON v.id = c.target_ref '
-            f'JOIN "observed-data" o ON c.source_ref = o.id'
+            f'JOIN "observed-data" o ON list_contains(o.object_refs, v.id)'
         )
         params = []
         if path and value is not None and not isinstance(path, (list, tuple)):
@@ -568,9 +521,9 @@ class NativeDuckDBStorage:
         return [row["table_name"] for row in rows if not row["table_name"].startswith("__")]
 
     def types(self, private=False):
+        del private
         internal = {"raw_query", "raw_bundle", "raw_run_object"}
-        rows = [name for name in self.tables() if name not in internal]
-        return rows if private else rows
+        return [name for name in self.tables() if name not in internal]
 
     def views(self):
         rows = self._query(
