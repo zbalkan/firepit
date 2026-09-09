@@ -13,6 +13,7 @@ with open('HISTORY.rst') as history_file:
 requirements = [
     'anytree',
     'python-dateutil',
+    'duckdb',
     'ijson',
     'lark',
     'tabulate',
@@ -24,16 +25,10 @@ setup_requirements = ['pytest-runner', 'wheel']
 
 test_requirements = ['pytest>=3',]
 
-extras_requirements = {
-    'postgres': ['psycopg2-binary'],
-    'async-postgres': ['asyncpg'],
-    'duckdb': ['duckdb'],
-}
-
 setup(
     author="IBM Security",
     author_email='pcoccoli@us.ibm.com',
-    python_requires='>=3.8',
+    python_requires='>=3.9',
     classifiers=[
         'Development Status :: 4 - Beta',
         'Topic :: Security',
@@ -41,7 +36,6 @@ setup(
         'License :: OSI Approved :: Apache Software License',
         'Natural Language :: English',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
@@ -54,7 +48,6 @@ setup(
         ],
     },
     install_requires=requirements,
-    extras_require=extras_requirements,
     license="Apache Software License 2.0",
     long_description=readme + '\n\n' + history,
     include_package_data=True,

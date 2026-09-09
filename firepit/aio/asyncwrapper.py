@@ -1,20 +1,19 @@
 import logging
-import os
-
-from urllib.parse import urlparse
 
 import ujson
 
 from firepit.aio.asyncstorage import AsyncStorage
+from firepit.duckdbstorage import get_storage, session_exists
 from firepit.exceptions import SessionExists, SessionNotFound
 from firepit.sqlstorage import SqlStorage, infer_type
-from firepit.sqlitestorage import get_storage
 
 
 logger = logging.getLogger(__name__)
 
 
 class SyncWrapper(AsyncStorage):
+    """Adapts the synchronous DuckDBStorage to AsyncStorage's async interface"""
+
     class Placeholder:
         def __str__(self, _offset=0):
             return '?'
@@ -30,31 +29,21 @@ class SyncWrapper(AsyncStorage):
         else:
             super().__init__(connstring, session_id)
             self.placeholder = '?'
-            self.dialect = 'sqlite3'
+            self.dialect = 'duckdb'
 
         # SQL data type inference function (database-specific)
         self.infer_type = infer_type
 
     async def create(self, ssl_context=None):
         """
-        Create a new "session".  Fail if it already exists.
+        Create a new "session" (DuckDB schema).  Fail if it already exists.
         """
-        if self.connstring.startswith('duckdb://'):
-            # DuckDB's session model is schema-per-file, like
-            # PostgreSQL's, not SQLite's one-file-per-session -- "the
-            # file exists" doesn't mean "the session exists".
-            from firepit import duckdbstorage
-            path = urlparse(self.connstring).path
-            if duckdbstorage.session_exists(path, self.session_id):
-                raise SessionExists(self.session_id or path)
-            logger.debug('Creating storage for session %s', self.session_id)
-            self.store = duckdbstorage.get_storage(path, self.session_id)
-        else:
-            # Fail if it already exists
-            if os.path.exists(self.connstring):
-                raise SessionExists(self.connstring)
-            logger.debug('Creating storage for session %s', self.session_id)
-            self.store = get_storage(self.connstring)
+        # DuckDB's session model is schema-per-file, like PostgreSQL's
+        # -- "the file exists" isn't "the session exists".
+        if session_exists(self.connstring, self.session_id):
+            raise SessionExists(self.session_id or self.connstring)
+        logger.debug('Creating storage for session %s', self.session_id)
+        self.store = get_storage(self.connstring, self.session_id)
         self.conn = self.store.connection
         self.placeholder = self.store.placeholder
         self.dialect = self.store.dialect
@@ -63,19 +52,10 @@ class SyncWrapper(AsyncStorage):
         """
         Attach/connect to an existing session.  Fail if it doesn't exist.
         """
-        if self.connstring.startswith('duckdb://'):
-            from firepit import duckdbstorage
-            path = urlparse(self.connstring).path
-            if not duckdbstorage.session_exists(path, self.session_id):
-                raise SessionNotFound(self.session_id or path)
-            logger.debug('Attaching to storage for session %s', self.session_id)
-            self.store = duckdbstorage.get_storage(path, self.session_id)
-        else:
-            # Fail if it doesn't exist
-            if not os.path.isfile(self.connstring):
-                raise SessionNotFound(self.connstring)
-            logger.debug('Attaching to storage for session %s', self.session_id)
-            self.store = get_storage(self.connstring)
+        if not session_exists(self.connstring, self.session_id):
+            raise SessionNotFound(self.session_id or self.connstring)
+        logger.debug('Attaching to storage for session %s', self.session_id)
+        self.store = get_storage(self.connstring, self.session_id)
         self.conn = self.store.connection
         self.placeholder = self.store.placeholder
         self.dialect = self.store.dialect
@@ -166,8 +146,12 @@ class SyncWrapper(AsyncStorage):
         self.store.connection.commit()
 
     def _write_one(self, cursor, tablename, obj, schema, query_id):
-        pairs = obj.items()
-        colnames = [i[0] for i in pairs if i != 'type']
+        # `i != 'type'` here used to compare a (k, v) tuple against a
+        # string, so it never actually filtered anything -- fixed to
+        # `k != 'type'`, and `values` below now comes from the same
+        # filtered list so the column/value counts stay in sync.
+        pairs = [(k, v) for k, v in obj.items() if k != 'type']
+        colnames = [k for k, _ in pairs]
         valnames = ', '.join([f'"{x}"' for x in colnames])
         ph = self.store.placeholder
         phs = ', '.join([ph] * len(colnames))
@@ -185,8 +169,8 @@ class SyncWrapper(AsyncStorage):
         # a no-op (nothing to ever conflict on); under DuckDB it's a
         # hard error ("no UNIQUE/PRIMARY KEY constraints... specify
         # ON CONFLICT columns manually").
-        values = tuple([ujson.dumps(i[1], ensure_ascii=False)
-                        if isinstance(i[1], list) else i[1] for i in pairs])
+        values = tuple(ujson.dumps(v, ensure_ascii=False)
+                       if isinstance(v, list) else v for _, v in pairs)
         #logger.debug('_upsert: "%s", %s', stmt, values)
         cursor.execute(stmt, values)
 

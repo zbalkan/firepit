@@ -82,9 +82,12 @@ def test_deref_mixed(mixed_v4_v6_bundle, tmpdir):
     assert 'COALESCE(dst_ref4.id, dst_ref6.id) AS "dst_ref.id"' in result_cols
     assert '"dst_ref4"."x_enrich" AS "dst_ref.x_enrich"' in result_cols
 
-    query = Query([
-        Table('conns'),
-        Order([('dst_ref.value', Order.ASC)]),
-    ])
+    # Sort by the dereferenced dst_ref.value: needs the same joins
+    # auto_deref_cached just computed, since "dst_ref.value" isn't a
+    # literal column on conns itself (only "dst_ref", a reference).
+    query = Query([Table('conns')])
+    query.extend(joins)
+    query.append(proj)
+    query.append(Order([('dst_ref.value', Order.ASC)]))
     store.assign_query('sconns', query)
     _ = store.lookup('sconns')

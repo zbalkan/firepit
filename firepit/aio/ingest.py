@@ -1,10 +1,11 @@
 """
 EXPERIMENTAL
-Async "fast translation" using stix-shifter and asyncpg
+Async "fast translation" using stix-shifter
 NB: This interface will likely change in the near future.
 """
 
 import logging
+import re
 import uuid
 from collections import OrderedDict, defaultdict
 from datetime import datetime
@@ -14,7 +15,6 @@ import ujson
 
 from firepit.aio.asyncstorage import AsyncStorage
 from firepit.exceptions import DuplicateTable
-from firepit.pgcommon import pg_shorten
 from firepit.props import KNOWN_PROPS
 from firepit.raft import json_normalize
 from firepit.stix21 import makeid
@@ -22,6 +22,24 @@ from firepit.timestamp import timefmt
 
 
 logger = logging.getLogger(__name__)
+
+_SHORTEN_NS = uuid.UUID('{c55c83a6-06d3-4680-b1e0-1cfd1deb332d}')
+
+
+def _shorten(key):
+    """
+    Shorten a STIX property path into a usable column name.
+
+    TODO: this was previously firepit.pgcommon.pg_shorten, kept
+    verbatim rather than switched to writer.shorten (which the
+    async ingest pipeline should really be using -- see the
+    non-async SplitWriter) as part of the aio/ingest.py rewrite.
+    """
+    key = re.sub(r"^extensions\.'(x-)?([\w\d_-]+)'\.", "x_", key)
+    if len(key) > 48:
+        # Still too long
+        key = uuid.uuid5(_SHORTEN_NS, key).hex
+    return key
 
 
 #TODO: These SQL schemas should live someplace common.
@@ -628,7 +646,7 @@ async def ingest(
 
         # shorten key (STIX prop) to make column names more manageable
         if len(obj_attr) > 48 or 'extensions.' in obj_attr:
-            shortname = pg_shorten(obj_attr)  # Need to detect collisions!
+            shortname = _shorten(obj_attr)  # Need to detect collisions!
             renames.append(f'{obj_name}#{obj_type}:{shortname}')
         else:
             shortname = obj_attr
