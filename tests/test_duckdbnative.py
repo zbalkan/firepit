@@ -1,3 +1,5 @@
+import json
+
 from firepit import get_storage
 
 
@@ -78,6 +80,24 @@ def test_native_storage_preserves_nested_types(tmpdir):
             'SELECT environment_variables FROM "process"'
         ).fetchone()
         assert row["environment_variables"]["TEMP"] == "C:\\Temp"
+    finally:
+        store.close()
+
+
+def test_raw_json_text_is_projected_by_duckdb(tmpdir):
+    store = get_storage(str(tmpdir.join("native-json.duckdb")), "hunt")
+    try:
+        store.cache("q1", json.dumps(_bundle()))
+        row = store._query(
+            'SELECT pid, typeof(pid) AS pid_type, child_refs, '
+            'typeof(child_refs) AS refs_type FROM "process"'
+        ).fetchone()
+        assert row["pid"] == 4242
+        assert row["pid_type"] == "UBIGINT"
+        assert row["child_refs"] == [
+            "process--22222222-2222-4222-8222-222222222222"
+        ]
+        assert row["refs_type"] == "VARCHAR[]"
     finally:
         store.close()
 

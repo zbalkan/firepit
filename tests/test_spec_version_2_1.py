@@ -4,7 +4,6 @@ import pytest
 
 from firepit import get_storage
 from firepit.exceptions import InvalidObject
-from firepit.raft import get_objects
 from .helpers import tmp_storage
 
 
@@ -57,7 +56,7 @@ def test_stix_21(bundle_21, tmpdir):
         store.close()
 
 
-def test_explicit_stix_20_is_rejected():
+def test_explicit_stix_20_is_rejected(tmpdir):
     bundle = {
         "type": "bundle",
         "objects": [
@@ -69,8 +68,12 @@ def test_explicit_stix_20_is_rejected():
             }
         ],
     }
-    with pytest.raises(InvalidObject, match="STIX 2.1 only"):
-        list(get_objects(bundle))
+    store = get_storage(str(tmpdir.join("reject-version.duckdb")), "hunt")
+    try:
+        with pytest.raises(InvalidObject, match="STIX 2.1 only"):
+            store.cache("q1", bundle)
+    finally:
+        store.close()
 
 
 def test_embedded_observed_data_objects_are_rejected(tmpdir):
@@ -96,15 +99,23 @@ def test_embedded_observed_data_objects_are_rejected(tmpdir):
         store.close()
 
 
-def test_sco_without_spec_version_is_valid_stix_21_input():
+def test_sco_without_spec_version_is_valid_stix_21_input(tmpdir):
+    ip_id = "ipv4-addr--11111111-1111-4111-8111-111111111111"
     bundle = {
         "type": "bundle",
         "objects": [
             {
                 "type": "ipv4-addr",
-                "id": "ipv4-addr--11111111-1111-4111-8111-111111111111",
+                "id": ip_id,
                 "value": "192.0.2.1",
             }
         ],
     }
-    assert [obj["type"] for obj in get_objects(bundle)] == ["ipv4-addr"]
+    store = get_storage(str(tmpdir.join("sco-no-version.duckdb")), "hunt")
+    try:
+        store.cache("q1", bundle)
+        assert store.lookup("ipv4-addr", cols=["id", "value"]) == [
+            {"id": ip_id, "value": "192.0.2.1"}
+        ]
+    finally:
+        store.close()

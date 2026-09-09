@@ -1,11 +1,6 @@
-"""Temporary compatibility shim for the retired generic SQL storage layer.
+"""Temporary compatibility shim for the retired generic SQL storage layer."""
 
-DuckDB-native storage is authoritative. The remaining symbols exist only to
-keep old imports readable while the Kestrel/query compatibility layers are
-removed in subsequent phases.
-"""
-
-from firepit.duckdbnative import NativeDuckDBStorage as SqlStorage
+from firepit.storage import DuckDBStorage as SqlStorage
 
 DB_VERSION = "3-native"
 
@@ -19,9 +14,7 @@ def infer_type(key, value):
         return "BIGINT"
     if isinstance(value, float):
         return "DOUBLE"
-    if isinstance(value, list):
-        return "JSON"
-    if isinstance(value, dict):
+    if isinstance(value, (list, dict)):
         return "JSON"
     return "VARCHAR"
 

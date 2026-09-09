@@ -1,24 +1,20 @@
-"""DuckDB-native STIX storage.
+"""DuckDB-native STIX 2.1 storage.
 
-STIX-pattern compilation is intentionally outside this module. Firepit stores
-STIX 2.1 data and exposes ordinary DuckDB tables/views; analytical filtering is
-SQL executed by DuckDB or by a higher-level client.
+Firepit accepts raw STIX 2.1 JSON and lets DuckDB perform object iteration,
+JSON extraction, and casts into the static native schema. Python only handles
+the storage boundary, transactions, and provenance.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
 import json
 import os
 import uuid
 
 import duckdb
 
-from firepit import raft
 from firepit.exceptions import InvalidAttr, InvalidObject, UnknownViewname
-from firepit.stix21 import makeid
-from firepit.stixschema import ListType, MapType, StructType
-from firepit.stixschema import rendered_schema, schema_for
+from firepit.stixschema import rendered_schema
 from firepit.validate import validate_name
 from firepit.views import install_views
 
@@ -31,67 +27,44 @@ def _qident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _json_path(name: str) -> str:
+    return '$."' + name.replace('"', '\\"') + '"'
+
+
 def _is_nested(dtype: str) -> bool:
     return dtype.endswith("[]") or dtype.startswith(_NESTED_PREFIXES)
 
 
-def _placeholder(dtype: str) -> str:
+def _json_projection(source: str, name: str, dtype: str) -> str:
+    path = _json_path(name)
+    if dtype == "VARCHAR":
+        return f"json_extract_string({source}, '{path}')"
     if dtype == "JSON":
-        return "?::JSON"
+        return f"json_extract({source}, '{path}')"
     if _is_nested(dtype):
-        return f"CAST(?::JSON AS {dtype})"
-    return "?"
+        return f"TRY_CAST(json_extract({source}, '{path}') AS {dtype})"
+    return f"TRY_CAST(json_extract_string({source}, '{path}') AS {dtype})"
 
 
-def _bind_value(value, dtype: str):
-    if value is None:
-        return None
-    if dtype == "JSON" or _is_nested(dtype):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    return value
-
-
-def _project_value(type_spec, value):
-    if value is None:
-        return None
-    if isinstance(type_spec, StructType):
-        if not isinstance(value, dict):
-            return value
-        return {
-            name: _project_value(field_type, value.get(name))
-            for name, field_type in type_spec.fields.items()
-        }
-    if isinstance(type_spec, ListType):
-        values = value if isinstance(value, list) else [value]
-        return [_project_value(type_spec.element, item) for item in values]
-    if isinstance(type_spec, MapType):
-        if not isinstance(value, dict):
-            return value
-        return {
-            str(key): _project_value(type_spec.value, item)
-            for key, item in value.items()
-        }
-    return value
-
-
-def _materialize_bundle(bundle):
+def _bundle_text(bundle) -> str:
     if isinstance(bundle, dict):
-        return bundle
+        return json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
     if hasattr(bundle, "read"):
         data = bundle.read()
         if isinstance(data, bytes):
             data = data.decode("utf-8")
-        return json.loads(data)
-    if isinstance(bundle, str):
-        if bundle.lstrip().startswith("{"):
-            return json.loads(bundle)
-        with open(bundle, "r", encoding="utf-8") as fp:
-            return json.load(fp)
+        return data
+    if isinstance(bundle, (str, os.PathLike)):
+        value = os.fspath(bundle)
+        if isinstance(value, str) and value.lstrip().startswith("{"):
+            return value
+        with open(value, "r", encoding="utf-8") as fp:
+            return fp.read()
     raise TypeError("bundle must be a dict, JSON string, file-like object, or path")
 
 
 class Result:
-    """Small dict-row wrapper kept for the transitional Python API."""
+    """Small dict-row wrapper for the transitional Python API."""
 
     def __init__(self, columns=(), rows=()):
         self._columns = tuple(columns)
@@ -114,7 +87,7 @@ class Result:
         self._pos = len(self._rows)
 
 
-class NativeDuckDBStorage:
+class DuckDBStorage:
     placeholder = "?"
 
     def __init__(self, dbname, session_id=None):
@@ -214,39 +187,70 @@ class NativeDuckDBStorage:
             f"CREATE TABLE {_qident(obj_type)} ({', '.join(columns)})"
         )
 
-    @staticmethod
-    def _normalize_objects(bundle):
-        for obj in raft.get_objects(bundle):
-            if not obj.get("type") and obj.get("id"):
-                obj["type"] = str(obj["id"]).partition("--")[0]
-            if obj.get("type") == "observed-data" and "objects" in obj:
-                yield from raft.upgrade_2021(obj)
-            else:
-                yield obj
+    def _validate_bundle(self, bundle_text: str):
+        try:
+            bundle_type = self.connection.execute(
+                "SELECT json_extract_string(?::JSON, '$.type')", (bundle_text,)
+            ).fetchone()[0]
+        except duckdb.Error as exc:
+            raise InvalidObject(f"invalid STIX JSON: {exc}") from exc
+        if bundle_type != "bundle":
+            raise InvalidObject("expected a STIX bundle")
 
-    @staticmethod
-    def _project(obj):
-        type_schema = schema_for(obj["type"])
-        row = {
-            name: _project_value(type_spec, obj.get(name))
-            for name, type_spec in type_schema.items()
-        }
-        row["_raw"] = obj
-        return row
+        row = self.connection.execute(
+            "SELECT "
+            "COUNT(*) FILTER (WHERE json_extract_string(value, '$.spec_version') "
+            "IS NOT NULL AND json_extract_string(value, '$.spec_version') <> '2.1') AS old_version, "
+            "COUNT(*) FILTER (WHERE json_extract_string(value, '$.type') = 'observed-data' "
+            "AND json_extract(value, '$.objects') IS NOT NULL) AS embedded, "
+            "COUNT(*) FILTER (WHERE json_extract_string(value, '$.type') = 'observed-data' "
+            "AND json_extract(value, '$.objects') IS NULL "
+            "AND json_extract(value, '$.object_refs') IS NULL) AS missing_refs "
+            "FROM json_each(?::JSON, '$.objects')",
+            (bundle_text,),
+        ).fetchone()
+        if row[0]:
+            raise InvalidObject("Firepit accepts STIX 2.1 only")
+        if row[1]:
+            raise InvalidObject(
+                "embedded observed-data.objects is not supported; "
+                "provide STIX 2.1 observed-data.object_refs"
+            )
+        if row[2]:
+            raise InvalidObject("observed-data must provide object_refs")
 
-    def _insert_rows(self, obj_type, rows, query_id):
-        if not rows:
-            return
+    def _object_types(self, bundle_text: str):
+        rows = self.connection.execute(
+            "SELECT DISTINCT json_extract_string(value, '$.type') AS obj_type "
+            "FROM json_each(?::JSON, '$.objects') "
+            "WHERE json_extract_string(value, '$.type') IS NOT NULL",
+            (bundle_text,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def _object_count(self, bundle_text: str) -> int:
+        return int(self.connection.execute(
+            "SELECT COUNT(*) FROM json_each(?::JSON, '$.objects')",
+            (bundle_text,),
+        ).fetchone()[0])
+
+    def _insert_type_from_json(self, obj_type: str, bundle_text: str, query_id):
         self._create_native_table(obj_type)
         schema = rendered_schema(obj_type)
         columns = list(schema) + ["_raw"]
-        dtypes = [schema[name] for name in schema] + ["JSON"]
         col_sql = ", ".join(_qident(name) for name in columns)
-        row_sql = "(" + ", ".join(_placeholder(dtype) for dtype in dtypes) + ")"
+        projections = [
+            _json_projection("value", name, dtype)
+            for name, dtype in schema.items()
+        ]
+        projections.append("value::JSON")
         stmt = (
-            f"INSERT INTO {_qident(obj_type)} ({col_sql}) VALUES "
-            + ", ".join([row_sql] * len(rows))
+            f"INSERT INTO {_qident(obj_type)} ({col_sql}) "
+            f"SELECT {', '.join(projections)} "
+            "FROM json_each(?::JSON, '$.objects') "
+            "WHERE json_extract_string(value, '$.type') = ?"
         )
+
         if "id" in schema:
             updates = []
             for name in columns:
@@ -277,30 +281,28 @@ class NativeDuckDBStorage:
                 updates.append(f"{_qident(name)} = {expr}")
             stmt += " ON CONFLICT (id) DO UPDATE SET " + ", ".join(updates)
 
-        values = []
-        memberships = []
-        for row in rows:
-            for name, dtype in zip(columns, dtypes):
-                values.append(_bind_value(row.get(name), dtype))
-            if query_id and row.get("id"):
-                memberships.append((str(query_id), row["id"]))
-        self.connection.execute(stmt, values)
-        if memberships:
-            self.connection.executemany(
-                'INSERT INTO "raw_run_object" (query_id, object_id) VALUES (?, ?)',
-                memberships,
+        self.connection.execute(stmt, (bundle_text, obj_type))
+
+        if query_id:
+            self.connection.execute(
+                'INSERT INTO "raw_run_object" (query_id, object_id) '
+                "SELECT ?, json_extract_string(value, '$.id') "
+                "FROM json_each(?::JSON, '$.objects') "
+                "WHERE json_extract_string(value, '$.type') = ? "
+                "AND json_extract_string(value, '$.id') IS NOT NULL",
+                (str(query_id), bundle_text, obj_type),
             )
 
     def cache(self, query_id, bundles, batchsize=2000, source=None,
               stix_pattern=None, native_query=None, **_kwargs):
-        """Ingest STIX data and record acquisition provenance."""
+        """Ingest raw STIX 2.1 JSON and record acquisition provenance."""
+        del batchsize
         if not isinstance(bundles, list):
             bundles = [bundles]
-        materialized = [_materialize_bundle(bundle) for bundle in bundles]
+        bundle_texts = [_bundle_text(bundle) for bundle in bundles]
         qid = str(query_id) if query_id is not None else None
-
-        pending = defaultdict(list)
         object_count = 0
+
         self.connection.execute("BEGIN")
         try:
             if qid:
@@ -315,26 +317,16 @@ class NativeDuckDBStorage:
                     (qid, source, stix_pattern, native_query),
                 )
 
-            for bundle in materialized:
+            for text in bundle_texts:
+                self._validate_bundle(text)
                 self.connection.execute(
                     'INSERT INTO "raw_bundle" VALUES (?, ?, current_timestamp, ?::JSON)',
-                    (str(uuid.uuid4()), qid,
-                     json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))),
+                    (str(uuid.uuid4()), qid, text),
                 )
-                for obj in self._normalize_objects(bundle):
-                    obj_type = obj.get("type")
-                    if not obj_type:
-                        continue
-                    object_count += 1
-                    if "id" in obj:
-                        obj["id"] = str(obj["id"])
-                    pending[obj_type].append(self._project(obj))
-                    if len(pending[obj_type]) >= batchsize:
-                        self._insert_rows(obj_type, pending[obj_type], qid)
-                        pending[obj_type].clear()
+                object_count += self._object_count(text)
+                for obj_type in self._object_types(text):
+                    self._insert_type_from_json(obj_type, text, qid)
 
-            for obj_type, rows in pending.items():
-                self._insert_rows(obj_type, rows, qid)
             if qid:
                 self.connection.execute(
                     'UPDATE "raw_query" SET completed_at = current_timestamp, '
@@ -352,31 +344,6 @@ class NativeDuckDBStorage:
                     (str(exc), qid),
                 )
             raise
-
-    def load(self, _name, objects, sco_type=None, query_id=None, preserve_ids=True):
-        """Compatibility ingestion helper; it no longer creates a named view."""
-        if not objects:
-            return sco_type
-        qid = query_id or str(uuid.uuid4())
-        normalized = []
-        for obj in objects:
-            if isinstance(obj, str):
-                if not sco_type:
-                    raise InvalidObject("sco_type is required for scalar input")
-                obj = {"type": sco_type, "value": obj}
-            if not isinstance(obj, dict):
-                raise InvalidObject("unknown data format")
-            obj = dict(obj)
-            obj_type = obj.get("type") or sco_type
-            if not obj_type:
-                raise InvalidObject("missing `type`")
-            obj["type"] = obj_type
-            if not obj.get("id") or not preserve_ids:
-                obj["id"] = makeid(obj)
-            normalized.append(obj)
-            sco_type = sco_type or obj_type
-        self.cache(qid, {"type": "bundle", "objects": normalized})
-        return sco_type
 
     def lookup(self, viewname, cols="*", limit=None, offset=None, col_dict=None):
         del col_dict
@@ -536,12 +503,8 @@ class NativeDuckDBStorage:
         self.connection.close()
 
 
-def get_native_storage(path, session_id=None):
-    return NativeDuckDBStorage(path, session_id)
-
-
 def get_storage(path, session_id=None):
-    return NativeDuckDBStorage(path, session_id)
+    return DuckDBStorage(path, session_id)
 
 
 def session_exists(path, session_id=None):

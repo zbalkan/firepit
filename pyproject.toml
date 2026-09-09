@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "firepit"
 version = "2.3.35"
-description = "DuckDB-backed storage and query utilities for STIX data."
+description = "DuckDB-native storage and query utilities for STIX 2.1 data."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11,<3.15"
 license = "Apache-2.0"
@@ -27,17 +27,14 @@ classifiers = [
 ]
 dependencies = [
     "duckdb",
-    "ijson",
     "tabulate",
     "typer",
-    "ujson",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest>=8",
     "pytest-cov",
-    "stix2",
     "tox>=4",
 ]
 lint = [
