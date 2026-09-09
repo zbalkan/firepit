@@ -1,59 +1,14 @@
 class InvalidAttr(Exception):
-    def __init__(self, msg):
-        self.message = msg
-
-    def __str__(self):
-        return f"{self.message}"
+    """A requested DuckDB/STIX attribute is invalid."""
 
 
 class InvalidObject(Exception):
-    def __init__(self, msg):
-        self.message = msg
-
-    def __str__(self):
-        return f"{self.message}"
-
-
-class StixPatternError(Exception):
-    def __init__(self, stix):
-        self.stix = stix
-
-    def __str__(self):
-        return f"{self.stix}"
+    """Input is not valid for the STIX 2.1 storage boundary."""
 
 
 class InvalidViewname(Exception):
-    pass
-
-
-class InvalidStixPath(Exception):
-    pass
-
-
-class IncompatibleType(Exception):
-    pass
+    """A SQL identifier supplied as a table/view/session name is invalid."""
 
 
 class UnknownViewname(Exception):
-    pass
-
-
-class DuplicateTable(Exception):
-    pass
-
-
-class UnexpectedError(Exception):
-    pass
-
-
-class DatabaseMismatch(Exception):
-    def __init__(self, dbversion, expected):
-        super().__init__(f'got version {dbversion}; expected {expected}')
-
-
-class SessionNotFound(Exception):
-    pass
-
-
-class SessionExists(Exception):
-    pass
+    """A requested DuckDB table or view does not exist."""

@@ -1,25 +1,13 @@
-"""STIX and SQL identifier validators"""
+"""Validation for SQL identifiers accepted by Firepit."""
 
 import re
 
-from firepit.exceptions import InvalidStixPath
 from firepit.exceptions import InvalidViewname
 
-NAME_PATTERN = r'^[\w-]+$'
-PATH_PATTERN = r"^([a-zA-Z][a-zA-Z0-9-]*:)?[\w]+(\[\*\])?((\.\w+|\.\'[a-zA-Z0-9-]+\')(\[\*\])?)*$"
+_NAME_RE = re.compile(r"^[\w-]+$")
+
 
 def validate_name(name):
-    """
-    Make sure `name` is a valid (SQL) identifier
-    """
-    if not isinstance(name, str) or not bool(re.match(NAME_PATTERN, name)):
+    """Require a simple identifier before interpolating it into DuckDB SQL."""
+    if not isinstance(name, str) or _NAME_RE.fullmatch(name) is None:
         raise InvalidViewname(name)
-
-
-def validate_path(path):
-    """
-    Make sure `path` is a valid STIX object path or property name
-    """
-    if (not isinstance(path, str) or
-        not bool(re.match(PATH_PATTERN, path))):
-        raise InvalidStixPath(path)
