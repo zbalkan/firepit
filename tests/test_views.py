@@ -90,6 +90,40 @@ def test_explicit_process_and_network_views(tmpdir):
         store.close()
 
 
+def test_network_view_handles_domain_and_mac_references(tmpdir):
+    domain = "domain-name--88888888-8888-4888-8888-888888888888"
+    mac = "mac-addr--99999999-9999-4999-8999-999999999999"
+    conn = "network-traffic--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    bundle = {
+        "type": "bundle",
+        "objects": [
+            {"type": "domain-name", "spec_version": "2.1", "id": domain, "value": "example.com"},
+            {"type": "mac-addr", "spec_version": "2.1", "id": mac, "value": "00:11:22:33:44:55"},
+            {
+                "type": "network-traffic", "spec_version": "2.1", "id": conn,
+                "src_ref": mac, "dst_ref": domain, "protocols": ["ethernet", "ipv4", "tcp"],
+                "ipfix": {"octetDeltaCount": 12, "interfaceName": "wan0"},
+                "encapsulates_refs": [],
+            },
+        ],
+    }
+    store = get_storage(str(tmpdir.join("domain-mac.duckdb")), "hunt")
+    try:
+        store.cache("q1", bundle)
+        row = store.connection.execute(
+            'SELECT src_mac, src_domain, dst_mac, dst_domain '
+            'FROM "stixv_network_traffic" WHERE id = ?',
+            (conn,),
+        ).fetchone()
+        assert row == ("00:11:22:33:44:55", None, None, "example.com")
+        ipfix = store.connection.execute(
+            'SELECT ipfix FROM "network-traffic" WHERE id = ?', (conn,)
+        ).fetchone()[0]
+        assert 'octetDeltaCount' in str(ipfix)
+    finally:
+        store.close()
+
+
 def test_base_table_queries_do_not_auto_dereference(tmpdir):
     store = get_storage(str(tmpdir.join("lookup.duckdb")), "hunt")
     try:

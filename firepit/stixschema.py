@@ -1,8 +1,8 @@
 """DuckDB-native type definitions for the STIX 2.1 data model.
 
 Known STIX structure is represented with DuckDB scalar, LIST, MAP and STRUCT
-columns. JSON is an explicit exception for genuinely heterogeneous or
-open-ended values; it is not the default storage type.
+columns. JSON is an explicit exception for genuinely heterogeneous values; it
+is not the default storage type.
 """
 
 from dataclasses import dataclass
@@ -59,6 +59,21 @@ def render_type(type_spec):
 
 
 HASHES = map_of('VARCHAR', 'VARCHAR')
+EXTENSIONS = map_of('VARCHAR', 'JSON')
+
+EXTERNAL_REFERENCE = struct({
+    'source_name': 'VARCHAR',
+    'description': 'VARCHAR',
+    'url': 'VARCHAR',
+    'hashes': HASHES,
+    'external_id': 'VARCHAR',
+})
+
+GRANULAR_MARKING = struct({
+    'lang': 'VARCHAR',
+    'marking_ref': 'VARCHAR',
+    'selectors': list_of('VARCHAR'),
+})
 
 EMAIL_MIME_PART = struct({
     'body': 'VARCHAR',
@@ -73,8 +88,7 @@ WINDOWS_PROCESS_EXT = struct({
     'priority': 'VARCHAR',
     'owner_sid': 'VARCHAR',
     'windows_title': 'VARCHAR',
-    # STARTUP_INFO is a defined dictionary, but its values are not constrained
-    # to one homogeneous scalar type by STIX.
+    # STARTUP_INFO is defined, but its member values are heterogeneous.
     'startup_info': 'JSON',
     'integrity_level': 'VARCHAR',
 })
@@ -159,8 +173,7 @@ RASTER_IMAGE_EXT = struct({
     'image_height': 'UBIGINT',
     'image_width': 'UBIGINT',
     'bits_per_pixel': 'UBIGINT',
-    # EXIF values are explicitly allowed to be integer or string. Keep this
-    # localized field as JSON until UNION conversion is implemented robustly.
+    # EXIF values may be either integer or string.
     'exif_tags': 'JSON',
 })
 
@@ -265,12 +278,44 @@ SCO_TYPES = {
     'user-account', 'windows-registry-key', 'x509-certificate',
 }
 
+SDO_TYPES = {
+    'attack-pattern', 'campaign', 'course-of-action', 'grouping', 'identity',
+    'incident', 'indicator', 'infrastructure', 'intrusion-set', 'location',
+    'malware', 'malware-analysis', 'note', 'observed-data', 'opinion',
+    'report', 'threat-actor', 'tool', 'vulnerability',
+}
+
+SRO_TYPES = {'relationship', 'sighting'}
+
+SCO_COMMON = {
+    'object_marking_refs': list_of('VARCHAR'),
+    'granular_markings': list_of(GRANULAR_MARKING),
+    'defanged': 'BOOLEAN',
+    'extensions': EXTENSIONS,
+}
+
+SDO_SRO_COMMON = {
+    'created_by_ref': 'VARCHAR',
+    'created': 'TIMESTAMPTZ',
+    'modified': 'TIMESTAMPTZ',
+    'revoked': 'BOOLEAN',
+    'labels': list_of('VARCHAR'),
+    'confidence': 'UTINYINT',
+    'lang': 'VARCHAR',
+    'external_references': list_of(EXTERNAL_REFERENCE),
+    'object_marking_refs': list_of('VARCHAR'),
+    'granular_markings': list_of(GRANULAR_MARKING),
+    'extensions': EXTENSIONS,
+}
+
 STIX_21_SCHEMAS = {
     'artifact': {
         'mime_type': 'VARCHAR',
         'payload_bin': 'VARCHAR',
         'url': 'VARCHAR',
         'hashes': HASHES,
+        'encryption_algorithm': 'VARCHAR',
+        'decryption_key': 'VARCHAR',
     },
     'autonomous-system': {
         'number': 'UBIGINT',
@@ -351,6 +396,13 @@ STIX_21_SCHEMAS = {
         'dst_byte_count': 'UBIGINT',
         'src_packets': 'UBIGINT',
         'dst_packets': 'UBIGINT',
+        # IPFIX values are defined as integer OR string; keep this local field
+        # JSON rather than pretending the dictionary has one scalar value type.
+        'ipfix': 'JSON',
+        'src_payload_ref': 'VARCHAR',
+        'dst_payload_ref': 'VARCHAR',
+        'encapsulates_refs': list_of('VARCHAR'),
+        'encapsulated_by_ref': 'VARCHAR',
         'extensions': NETWORK_TRAFFIC_EXTENSIONS,
     },
     'process': {
@@ -420,30 +472,20 @@ STIX_21_SCHEMAS = {
         'x509_v3_extensions': X509_V3_EXTENSIONS,
     },
     'identity': {
-        'identity_class': 'VARCHAR',
         'name': 'VARCHAR',
+        'description': 'VARCHAR',
+        'roles': list_of('VARCHAR'),
+        'identity_class': 'VARCHAR',
         'sectors': list_of('VARCHAR'),
         'contact_information': 'VARCHAR',
-        'created': 'TIMESTAMPTZ',
-        'modified': 'TIMESTAMPTZ',
     },
     'observed-data': {
-        'created_by_ref': 'VARCHAR',
-        'created': 'TIMESTAMPTZ',
-        'modified': 'TIMESTAMPTZ',
         'first_observed': 'TIMESTAMPTZ',
         'last_observed': 'TIMESTAMPTZ',
         'number_observed': 'UBIGINT',
         'object_refs': list_of('VARCHAR'),
     },
     'relationship': {
-        'created_by_ref': 'VARCHAR',
-        'created': 'TIMESTAMPTZ',
-        'modified': 'TIMESTAMPTZ',
-        'revoked': 'BOOLEAN',
-        'labels': list_of('VARCHAR'),
-        'confidence': 'USMALLINT',
-        'lang': 'VARCHAR',
         'relationship_type': 'VARCHAR',
         'description': 'VARCHAR',
         'source_ref': 'VARCHAR',
@@ -458,7 +500,9 @@ def schema_for(obj_type):
     """Return a copy of the known native DuckDB schema for *obj_type*."""
     fields = {'id': 'VARCHAR'}
     if obj_type in SCO_TYPES:
-        fields['defanged'] = 'BOOLEAN'
+        fields.update(SCO_COMMON)
+    elif obj_type in SDO_TYPES or obj_type in SRO_TYPES:
+        fields.update(SDO_SRO_COMMON)
     fields.update(STIX_21_SCHEMAS.get(obj_type, {}))
     return fields
 

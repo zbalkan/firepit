@@ -60,28 +60,28 @@ def install_views(connection, session_id):
         )
 
     if _table_exists(connection, session_id, "network-traffic"):
-        has_v4 = _table_exists(connection, session_id, "ipv4-addr")
-        has_v6 = _table_exists(connection, session_id, "ipv6-addr")
+        address_types = {
+            "ipv4": ("ipv4-addr", "value"),
+            "ipv6": ("ipv6-addr", "value"),
+            "mac": ("mac-addr", "value"),
+            "domain": ("domain-name", "value"),
+        }
         select = ["nt.*"]
         joins = []
         for side in ("src", "dst"):
             ref = f"{side}_ref"
-            if has_v4:
-                alias = f"{side}4"
-                joins.append(
-                    f'LEFT JOIN "ipv4-addr" {alias} ON nt.{ref} = {alias}.id'
-                )
-                select.append(f"{alias}.value AS {side}_ipv4")
-            else:
-                select.append(f"CAST(NULL AS VARCHAR) AS {side}_ipv4")
-            if has_v6:
-                alias = f"{side}6"
-                joins.append(
-                    f'LEFT JOIN "ipv6-addr" {alias} ON nt.{ref} = {alias}.id'
-                )
-                select.append(f"{alias}.value AS {side}_ipv6")
-            else:
-                select.append(f"CAST(NULL AS VARCHAR) AS {side}_ipv6")
+            for suffix, (table, value_column) in address_types.items():
+                output = f"{side}_{suffix}"
+                if _table_exists(connection, session_id, table):
+                    alias = f"{side}_{suffix}"
+                    joins.append(
+                        f'LEFT JOIN "{table}" {alias} ON nt.{ref} = {alias}.id'
+                    )
+                    select.append(
+                        f"{alias}.{value_column} AS {output}"
+                    )
+                else:
+                    select.append(f"CAST(NULL AS VARCHAR) AS {output}")
         connection.execute(
             'CREATE OR REPLACE VIEW "stixv_network_traffic" AS SELECT '
             + ", ".join(select)
