@@ -1,10 +1,6 @@
 # type: ignore[attr-defined]
 
-"""Temporary Firepit CLI retained until Phase 8.
-
-The Kestrel-era mutable-variable and appdata commands have been removed. New
-analysis should use DuckDB SQL/UI directly.
-"""
+"""Temporary Firepit CLI retained until Phase 8."""
 
 import csv
 import json
@@ -64,26 +60,6 @@ def cache(
     store = _store()
     try:
         store.cache(query_id, filenames, batchsize=batchsize)
-    finally:
-        store.close()
-
-
-@app.command()
-def extract(name: str, sco_type: str, query_id: str, pattern: str = ""):
-    """Create a temporary compatibility view for one run and SCO type."""
-    store = _store()
-    try:
-        store.extract(name, sco_type, query_id, pattern)
-    finally:
-        store.close()
-
-
-@app.command()
-def filter(name: str, sco_type: str, source: str, pattern: str):
-    """Filter an existing view with the temporary local STIX-pattern adapter."""
-    store = _store()
-    try:
-        store.filter(name, sco_type, source, pattern)
     finally:
         store.close()
 
@@ -188,12 +164,12 @@ def provenance(query_id: str = typer.Argument(None)):
 
 @app.command()
 def load(
-    name: str,
     filename: str,
     sco_type: str = typer.Option(None),
     query_id: str = typer.Option(None),
     preserve_ids: bool = typer.Option(True),
 ):
+    """Ingest object records without creating a Firepit variable/view."""
     store = _store()
     try:
         with open(filename, "r", encoding="utf-8") as fp:
@@ -202,7 +178,7 @@ def load(
             except ValueError:
                 fp.seek(0)
                 data = list(csv.DictReader(fp))
-        store.load(name, data, sco_type, query_id, preserve_ids)
+        store.load(None, data, sco_type, query_id, preserve_ids)
     finally:
         store.close()
 

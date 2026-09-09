@@ -28,7 +28,6 @@ classifiers = [
 dependencies = [
     "duckdb",
     "ijson",
-    "lark",
     "tabulate",
     "typer",
     "ujson",
@@ -66,9 +65,6 @@ zip-safe = false
 
 [tool.setuptools.packages.find]
 include = ["firepit", "firepit.*"]
-
-[tool.setuptools.package-data]
-firepit = ["paramstix.lark"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

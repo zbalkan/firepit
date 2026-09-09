@@ -1,4 +1,9 @@
-"""DuckDB-native STIX storage with native references and explicit views."""
+"""DuckDB-native STIX storage.
+
+STIX-pattern compilation is intentionally outside this module. Firepit stores
+STIX 2.1 data and exposes ordinary DuckDB tables/views; analytical filtering is
+SQL executed by DuckDB or by a higher-level client.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,6 @@ import duckdb
 
 from firepit import raft
 from firepit.exceptions import InvalidAttr, InvalidObject, UnknownViewname
-from firepit.stix20 import stix2sql
 from firepit.stix21 import makeid
 from firepit.stixschema import ListType, MapType, StructType
 from firepit.stixschema import rendered_schema, schema_for
@@ -19,7 +23,7 @@ from firepit.validate import validate_name
 from firepit.views import install_views
 
 _NATIVE_META = "duckdb_native_model"
-_NATIVE_VERSION = "4"
+_NATIVE_VERSION = "5"
 _NESTED_PREFIXES = ("MAP(", "STRUCT(")
 
 
@@ -87,6 +91,8 @@ def _materialize_bundle(bundle):
 
 
 class Result:
+    """Small dict-row wrapper kept for the transitional Python API."""
+
     def __init__(self, columns=(), rows=()):
         self._columns = tuple(columns)
         self._rows = list(rows)
@@ -177,13 +183,6 @@ class NativeDuckDBStorage:
             'CREATE TABLE IF NOT EXISTS "raw_run_object" ('
             'query_id VARCHAR, object_id VARCHAR)'
         )
-        # Temporary metadata for the local pattern compatibility adapter. It is
-        # deleted with that adapter in Phase 5/6.
-        self.connection.execute(
-            'CREATE TABLE IF NOT EXISTS "__columns" '
-            '(otype VARCHAR, path VARCHAR, shortname VARCHAR, dtype VARCHAR, '
-            ' UNIQUE(otype, path))'
-        )
         if not row:
             self.connection.execute(
                 'INSERT INTO "__metadata" (name, value) VALUES (?, ?)',
@@ -214,12 +213,6 @@ class NativeDuckDBStorage:
         self.connection.execute(
             f"CREATE TABLE {_qident(obj_type)} ({', '.join(columns)})"
         )
-        for name, dtype in schema.items():
-            self.connection.execute(
-                'INSERT INTO "__columns" (otype, path, shortname, dtype) '
-                'VALUES (?, ?, ?, ?) ON CONFLICT (otype, path) DO NOTHING',
-                (obj_type, name, name, dtype),
-            )
 
     @staticmethod
     def _normalize_objects(bundle):
@@ -300,6 +293,7 @@ class NativeDuckDBStorage:
 
     def cache(self, query_id, bundles, batchsize=2000, source=None,
               stix_pattern=None, native_query=None, **_kwargs):
+        """Ingest STIX data and record acquisition provenance."""
         if not isinstance(bundles, list):
             bundles = [bundles]
         materialized = [_materialize_bundle(bundle) for bundle in bundles]
@@ -359,7 +353,8 @@ class NativeDuckDBStorage:
                 )
             raise
 
-    def load(self, viewname, objects, sco_type=None, query_id=None, preserve_ids=True):
+    def load(self, _name, objects, sco_type=None, query_id=None, preserve_ids=True):
+        """Compatibility ingestion helper; it no longer creates a named view."""
         if not objects:
             return sco_type
         qid = query_id or str(uuid.uuid4())
@@ -381,33 +376,7 @@ class NativeDuckDBStorage:
             normalized.append(obj)
             sco_type = sco_type or obj_type
         self.cache(qid, {"type": "bundle", "objects": normalized})
-        self.extract(viewname, sco_type, qid, "")
         return sco_type
-
-    def _create_view(self, viewname, select):
-        validate_name(viewname)
-        self.connection.execute(f"DROP VIEW IF EXISTS {_qident(viewname)}")
-        self.connection.execute(f"CREATE VIEW {_qident(viewname)} AS {select}")
-
-    def extract(self, viewname, sco_type, query_id, pattern):
-        validate_name(viewname)
-        validate_name(sco_type)
-        where = stix2sql(pattern, sco_type) if pattern else None
-        qid = str(query_id).replace("'", "''")
-        sql = (
-            f"SELECT * FROM {_qident(sco_type)} WHERE id IN ("
-            f'SELECT object_id FROM "raw_run_object" WHERE query_id = \'{qid}\')'
-        )
-        if where:
-            sql += f" AND ({where})"
-        self._create_view(viewname, sql)
-
-    def filter(self, viewname, sco_type, input_view, pattern):
-        where = stix2sql(pattern, sco_type) if pattern else None
-        sql = f"SELECT * FROM {_qident(input_view)}"
-        if where:
-            sql += f" WHERE {where}"
-        self._create_view(viewname, sql)
 
     def lookup(self, viewname, cols="*", limit=None, offset=None, col_dict=None):
         del col_dict
@@ -489,9 +458,7 @@ class NativeDuckDBStorage:
         return row
 
     def timestamped(self, viewname, path=None, value=None,
-                    timestamp="first_observed", limit=None, run=True):
-        if not run:
-            raise NotImplementedError("query-object output is retired")
+                    timestamp="first_observed", limit=None):
         projection = [f"o.{_qident(timestamp)} AS {_qident(timestamp)}"]
         if path:
             paths = path if isinstance(path, (list, tuple)) else [path]
