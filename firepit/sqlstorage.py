@@ -67,8 +67,8 @@ def _get_col_dict(store):
     return col_dict
 
 
-def _format_query(query, dialect):
-    query_text, query_values = query.render('{}', dialect)
+def _format_query(query):
+    query_text, query_values = query.render('{}')
     formatted_values = [f"'{v}'" if isinstance(v, str) else v for v in query_values]
     return query_text.format(*formatted_values)
 
@@ -141,18 +141,11 @@ def get_path_joins(viewname, sco_type, column):
 
 
 class SqlStorage:
+    # DB API parameter placeholder syntax
+    placeholder = '?'
+
     def __init__(self):
         self.connection = None  # Python DB API connection object
-        self.placeholder = '%s'  # Derived class can override this
-        self.dialect = None      # Derived class can override this
-
-        # Functions to use for min/max text.  It can vary - sqlite3
-        # uses MIN/MAX, postgresql uses LEAST/GREATEST
-        self.text_min = 'MIN'
-        self.text_max = 'MAX'
-
-        # Function that returns first non-null arg_type
-        self.ifnull = 'IFNULL'
 
         # Python-to-SQL type mapper
         self.infer_type = infer_type
@@ -233,13 +226,14 @@ class SqlStorage:
         cursor.execute(statement)
         return cursor
 
-    def _command(self, cmd, cursor=None):
-        """Private wrapper for logging SQL commands"""
-        logger.debug('Executing command: %s', cmd)
-        if not cursor:
-            cursor = self.connection.cursor()
-        cursor.execute(cmd)
-        self.connection.commit()
+    def _get_cursor(self):
+        """
+        Get a cursor for a multi-statement sequence the caller will
+        run and commit itself (e.g. several DDL statements, or a
+        view-swap) -- as opposed to `_execute`'s single fire-and-
+        forget statement.
+        """
+        return self._execute('BEGIN;')
 
     def _query(self, query, values=None, cursor=None):
         """Private wrapper for logging SQL query"""
@@ -342,7 +336,7 @@ class SqlStorage:
         validate_name(viewname)
         validate_name(tablename)
         try:
-            where = stix2sql(pattern, sco_type, self.dialect) if pattern else None
+            where = stix2sql(pattern, sco_type) if pattern else None
         except Exception as e:
             logger.error('%s', e)
             raise StixPatternError(pattern) from e
@@ -354,7 +348,7 @@ class SqlStorage:
                 where = clause
 
         # Need to convert viewname from identifier to string, so use single quotes
-        cursor = self._execute('BEGIN;')
+        cursor = self._get_cursor()
         select = (f'SELECT "{sco_type}".* FROM "{sco_type}" WHERE "id" IN'
                   f' (SELECT "{sco_type}".id FROM "{sco_type}"'
                   f'  INNER JOIN __queries ON "{sco_type}".id = __queries.sco_id'
@@ -368,9 +362,9 @@ class SqlStorage:
         excluded = []
         for col in colnames:
             if col == 'first_observed':
-                excluded.append(f'first_observed = {self.text_min}("{tablename}".first_observed, EXCLUDED.first_observed)')
+                excluded.append(f'first_observed = LEAST("{tablename}".first_observed, EXCLUDED.first_observed)')
             elif col == 'last_observed':
-                excluded.append(f'last_observed = {self.text_max}("{tablename}".last_observed, EXCLUDED.last_observed)')
+                excluded.append(f'last_observed = GREATEST("{tablename}".last_observed, EXCLUDED.last_observed)')
             elif col == 'number_observed':
                 excluded.append(f'number_observed = "{tablename}".number_observed + EXCLUDED.number_observed')
             elif col == 'id':
@@ -414,9 +408,7 @@ class SqlStorage:
         them, splits out SCOs by type, and inserts into a database
         with 1 table per type.
 
-        Accepts some keyword args for runtime options, some of which
-        may depend on what database type is in use (e.g. sqlite3,
-        postgresql, ...)
+        Accepts some keyword args for runtime options.
 
         Args:
 
@@ -510,7 +502,7 @@ class SqlStorage:
         if not objects:
             return
 
-        cursor = self._execute('BEGIN;')
+        cursor = self._get_cursor()
         if 'id' not in objects[0]:
             # Maybe it's aggregates?  Do "copy-on-write"
             self._execute(f'DROP VIEW IF EXISTS "{viewname}"', cursor)
@@ -553,7 +545,7 @@ class SqlStorage:
         for col in l_cols - r_cols:
             cols.add(f'{l_var}."{col}" AS "{col}"')
         for col in l_cols & r_cols:
-            cols.add(f'{self.ifnull}({l_var}."{col}", {r_var}."{col}") AS "{col}"')
+            cols.add(f'COALESCE({l_var}."{col}", {r_var}."{col}") AS "{col}"')
         for col in r_cols - l_cols:
             cols.add(f'{r_var}."{col}" as "{col}"')
         scols = ', '.join(cols)
@@ -588,7 +580,7 @@ class SqlStorage:
                      sco_type, viewname, input_view, pattern)
         slct = self._get_view_def(input_view)
         try:
-            where = stix2sql(pattern, sco_type, self.dialect) if pattern else None
+            where = stix2sql(pattern, sco_type) if pattern else None
         except Exception as e:
             logger.error('%s', e)
             raise StixPatternError(pattern) from e
@@ -781,7 +773,7 @@ class SqlStorage:
         return res
 
     def run_query(self, query):
-        query_text, query_values = query.render(self.placeholder, self.dialect)
+        query_text, query_values = query.render(self.placeholder)
         return self._query(query_text, query_values)
 
     def merge(self, viewname, input_views):
@@ -805,7 +797,7 @@ class SqlStorage:
     def remove_view(self, viewname):
         """Remove view `viewname`"""
         validate_name(viewname)
-        cursor = self._execute('BEGIN;')
+        cursor = self._get_cursor()
         self._execute(f'DROP VIEW IF EXISTS "{viewname}";', cursor)
         self._drop_name(cursor, viewname)
         self.connection.commit()
@@ -817,7 +809,7 @@ class SqlStorage:
         validate_name(newname)
         view_type = self.table_type(oldname)
         view_def = self._get_view_def(oldname)
-        cursor = self._execute('BEGIN;')
+        cursor = self._get_cursor()
 
         # Need to remove `newname` if it already exists
         self._drop_name(cursor, newname)
@@ -855,7 +847,7 @@ class SqlStorage:
                 if schema:
                     query.aggs = _make_aggs(query.groupby.cols, sco_type, schema)
 
-        stmt = _format_query(query, self.dialect)
+        stmt = _format_query(query)
         logger.debug('assign_query: %s', stmt)
         cursor = self._create_view(viewname, stmt, sco_type, deps=deps)
         self.connection.commit()

@@ -20,18 +20,17 @@ from firepit.query import Unique
 
 
 @pytest.mark.parametrize(
-    'lhs, op, rhs, dialect, expected_len, expected_text', [
-        ('foo', '=', 99, 'sqlite3', 1, '("foo" = ?)'),
-        ('bar', '>=', 99, 'sqlite3', 1, '("bar" >= ?)'),
-        ('baz', 'LIKE', '%blah%', 'sqlite3', 1, '("baz" LIKE ?)'),
-        ('baz', 'MATCHES', '^fooba.$', 'sqlite3', 1, '(match(?, "baz"))'),
-        ('baz', 'MATCHES', '^fooba.$', 'postgresql', 1, '(match(%s, "baz"))'),
+    'lhs, op, rhs, placeholder, expected_len, expected_text', [
+        ('foo', '=', 99, '?', 1, '("foo" = ?)'),
+        ('bar', '>=', 99, '?', 1, '("bar" >= ?)'),
+        ('baz', 'LIKE', '%blah%', '?', 1, '("baz" LIKE ?)'),
+        ('baz', 'MATCHES', '^fooba.$', '?', 1, '(match(?, "baz"))'),
+        ('baz', 'MATCHES', '^fooba.$', '%s', 1, '(match(%s, "baz"))'),
     ]
 )
-def test_predicate(lhs, op, rhs, dialect, expected_len, expected_text):
+def test_predicate(lhs, op, rhs, placeholder, expected_len, expected_text):
     p1 = Predicate(lhs, op, rhs)
-    ph = '%s' if dialect == 'postgresql' else '?'
-    text = p1.render(ph, dialect)
+    text = p1.render(placeholder)
     assert text == expected_text
     assert str(rhs) not in text
     assert len(p1.values) == expected_len

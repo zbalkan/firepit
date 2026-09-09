@@ -123,7 +123,7 @@ class BinnedColumn(Column):
         self.n = n
         self.unit = unit.lower() if unit else ''
 
-    def render(self, _placeholder, dialect=None):
+    def render(self, _placeholder):
         if self.table:
             col = f'"{self.table}".{_quote(self.name)}'
         else:
@@ -145,23 +145,13 @@ class BinnedColumn(Column):
         if secs:
             # Must be a timestamp
             bin_size = self.n * secs
-            if dialect == 'postgresql':
-                # PostgreSQL
-                dt = f'to_timestamp((FLOOR(EXTRACT(epoch from {col}::timestamp)/{bin_size})*{bin_size}))'
-                return f'to_char({dt}, \'yyyy-MM-dd"T"HH24:MI:SS"Z"\') AS "{alias}"'
-            if dialect == 'duckdb':
-                dt = f'to_timestamp(floor(epoch(CAST({col} AS TIMESTAMP))/{bin_size})*{bin_size})'
-                return f'strftime({dt}, \'%Y-%m-%dT%H:%M:%SZ\') AS "{alias}"'
-            # sqlite3
-            dt = f"datetime(strftime('%s', {col})/{bin_size}*{bin_size}, 'unixepoch')"
-            return f'strftime(\'%Y-%m-%dT%H:%M:%SZ\', {dt}) AS "{alias}"'
+            dt = f'to_timestamp(floor(epoch(CAST({col} AS TIMESTAMP))/{bin_size})*{bin_size})'
+            return f'strftime({dt}, \'%Y-%m-%dT%H:%M:%SZ\') AS "{alias}"'
         # else we assume it's some numeric column
         bin_size = self.n
-        # DuckDB's `/` is always float division regardless of operand
-        # types (SQLite's and PostgreSQL's truncate for integer
-        # columns), so it needs integer division here instead.
-        op = '//' if dialect == 'duckdb' else '/'
-        return f'{col}{op}{bin_size}*{bin_size} AS "{alias}"'
+        # `/` is always float division in DuckDB regardless of operand
+        # types, so this needs integer division rather than `/`.
+        return f'{col}//{bin_size}*{bin_size} AS "{alias}"'
 
 
 class Predicate:
@@ -210,7 +200,7 @@ class Predicate:
         self.op = op
         self.rhs = rhs
 
-    def render(self, placeholder, dialect=None):
+    def render(self, placeholder):
         if isinstance(self.lhs, Predicate):
             text = self.lhs.render(placeholder)
             text += f' {self.op} '
@@ -274,7 +264,7 @@ class Filter:
         for pred in self.preds:
             self.values += pred.values
 
-    def render(self, placeholder, _dialect=None):
+    def render(self, placeholder):
         pred_list = []
         for pred in self.preds:
             pred_list.append(pred.render(placeholder))
@@ -304,7 +294,7 @@ class Order:
                 validate_path(col[0])
             self.cols.append(col)
 
-    def render(self, _placeholder, _dialect=None):
+    def render(self, _placeholder):
         col_list = []
         for col in self.cols:
             col_list.append(f'{_alias(col[0])} {col[1]}')
@@ -318,9 +308,9 @@ class Projection:
             _validate_column(col)
         self.cols = cols
 
-    def render(self, placeholder, dialect=None):
-        cols = [col.render(placeholder, dialect) if hasattr(col, 'render') else _quote(col)
-                for col in self.cols]  # Dumb hack to get db-specific fetures
+    def render(self, placeholder):
+        cols = [col.render(placeholder) if hasattr(col, 'render') else _quote(col)
+                for col in self.cols]
         return ', '.join(cols)
 
 
@@ -331,7 +321,7 @@ class Table:
         validate_name(name)
         self.name = name
 
-    def render(self, _placeholder, _dialect=None):
+    def render(self, _placeholder):
         return self.name
 
 
@@ -343,7 +333,7 @@ class Group:
             _validate_column(col)
         self.cols = cols
 
-    def render(self, _placeholder, _dialect=None):
+    def render(self, _placeholder):
         cols = []
         for col in self.cols:
             if hasattr(col, 'alias') and col.alias: # Ugly, ugly hack
@@ -383,7 +373,7 @@ class Aggregation:
                 raise TypeError('expected aggregation tuple but received ' + str(type(agg)))
         self.group_cols = []  # Filled in by Query
 
-    def render(self, _placeholder, _dialect=None):
+    def render(self, _placeholder):
         exprs = [_quote(col) for col in self.group_cols]
         for agg in self.aggs:
             mod = ''
@@ -410,7 +400,7 @@ class Offset:
     def __init__(self, num):
         self.num = int(num)
 
-    def render(self, _placeholder, _dialect=None):
+    def render(self, _placeholder):
         return str(self.num)
 
 
@@ -420,7 +410,7 @@ class Limit:
     def __init__(self, num):
         self.num = int(num)
 
-    def render(self, _placeholder, _dialect=None):
+    def render(self, _placeholder):
         return str(self.num)
 
 
@@ -430,7 +420,7 @@ class Count:
     def __init__(self):
         pass
 
-    def render(self, _placeholder, _dialect=None):
+    def render(self, _placeholder):
         return 'COUNT(*) AS "count"'
 
 
@@ -440,7 +430,7 @@ class Unique:
     def __init__(self):
         pass
 
-    def render(self, placeholder, dialect=None):
+    def render(self, placeholder):
         return 'SELECT DISTINCT *'
 
 
@@ -452,7 +442,7 @@ class CountUnique:
             _validate_column(col)
         self.cols = cols
 
-    def render(self, _placeholder, _dialect=None):
+    def render(self, _placeholder):
         if self.cols:
             cols = ', '.join([f'"{col}"' for col in self.cols])
             return f'COUNT(DISTINCT {cols}) AS "count"'
@@ -505,7 +495,7 @@ class Join:
             self.how == rhs.how and
             self.alias == rhs.alias)
 
-    def render(self, placeholder, _dialect=None):
+    def render(self, placeholder):
         # Assume there's a FROM before this?
         target = f'"{self.name}"'
         table = target
@@ -602,7 +592,7 @@ class Query:
         for stage in stages:
             self.append(stage)
 
-    def render(self, placeholder, dialect=None):
+    def render(self, placeholder):
         if not self.table:
             raise InvalidQuery("no table")  #TODO: better message
         result_cols = ''
@@ -630,7 +620,7 @@ class Query:
             where = ' AND '.join(filts)
             query = f'{query} WHERE {where}'
         if self.groupby:
-            text = self.groupby.render(placeholder, dialect)
+            text = self.groupby.render(placeholder)
             query = f'{query} GROUP BY {text}'
             # Add group cols to result set automatically
             if result_cols:
@@ -648,7 +638,7 @@ class Query:
         if self.proj:
             if result_cols:
                 result_cols += ', '
-            result_cols = self.proj.render(placeholder, dialect)
+            result_cols = self.proj.render(placeholder)
         if self.aggs:
             if result_cols:
                 result_cols += ', '

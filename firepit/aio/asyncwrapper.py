@@ -25,7 +25,7 @@ class SyncWrapper(AsyncStorage):
         if store:
             logger.debug('Wrapping storage object %s', store)
             self.store = store
-            self.dialect = self.store.dialect
+            self.dialect = 'duckdb'
         else:
             super().__init__(connstring, session_id)
             self.placeholder = '?'
@@ -46,7 +46,7 @@ class SyncWrapper(AsyncStorage):
         self.store = get_storage(self.connstring, self.session_id)
         self.conn = self.store.connection
         self.placeholder = self.store.placeholder
-        self.dialect = self.store.dialect
+        self.dialect = 'duckdb'
 
     async def attach(self):
         """
@@ -58,7 +58,7 @@ class SyncWrapper(AsyncStorage):
         self.store = get_storage(self.connstring, self.session_id)
         self.conn = self.store.connection
         self.placeholder = self.store.placeholder
-        self.dialect = self.store.dialect
+        self.dialect = 'duckdb'
 
     async def cache(self,
                     query_id: str,

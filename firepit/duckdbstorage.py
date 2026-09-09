@@ -163,12 +163,11 @@ class _Cursor:
 
     1. Correctness: duckdb's own `.cursor()` returns a genuinely
        independent connection with its own transaction state.
-       SqlStorage's `_execute('BEGIN;')`-as-cursor-factory idiom
-       (several call sites obtain a cursor, do a few statements, then
-       commit via `self.connection.commit()` -- a *different* object)
-       would silently lose those writes if `.cursor()` opened a real
-       second connection, since the parent's commit would never reach
-       them.
+       SqlStorage's `_get_cursor()` (several call sites obtain a
+       cursor, do a few statements, then commit via
+       `self.connection.commit()` -- a *different* object) would
+       silently lose those writes if `.cursor()` opened a real second
+       connection, since the parent's commit would never reach them.
 
     2. Speed: opening a real duckdb connection is far more expensive
        than sqlite3's lightweight `Cursor`, and needs `search_path`
@@ -185,9 +184,9 @@ class _Cursor:
     returns the cursor for the caller to fetch from.  Measured
     directly: that intervening `commit()` silently discards a still-
     pending duckdb result, so without eager fetching, any query run
-    through `_query` between an open `_execute('BEGIN;')` and its
-    matching `commit()` comes back empty.  Fetching up front sidesteps
-    that regardless of what happens to the connection afterward.
+    through `_query` between a `_get_cursor()` and its matching
+    `commit()` comes back empty.  Fetching up front sidesteps that
+    regardless of what happens to the connection afterward.
 
     `owns` marks the one `_Cursor` created in `DuckDBStorage.__init__`
     as `self.connection`: only *it* actually closes the underlying
@@ -248,11 +247,6 @@ class _Cursor:
 class DuckDBStorage(SqlStorage):
     def __init__(self, dbname, session_id=None):
         super().__init__()
-        self.dialect = 'duckdb'
-        self.placeholder = '?'
-        self.text_min = 'LEAST'
-        self.text_max = 'GREATEST'
-        self.ifnull = 'COALESCE'
         self.dbname = dbname
         self.session_id = session_id or 'main'
         validate_name(self.session_id)
@@ -394,7 +388,7 @@ class DuckDBStorage(SqlStorage):
         """Overrides parent"""
         validate_name(viewname)
         if not cursor:
-            cursor = self._execute('BEGIN;')
+            cursor = self._get_cursor()
         is_new = True
         if not deps:
             deps = []

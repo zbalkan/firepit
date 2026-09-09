@@ -11,14 +11,14 @@ def get_grammar():
     return open(pth, "r").read()
 
 
-def stix2sql(pattern, sco_type, dialect='sqlite3'):
+def stix2sql(pattern, sco_type):
     grammar = get_grammar()
     return Lark(grammar,
                 parser="lalr",
-                transformer=_TranslateTree(sco_type, dialect)).parse(pattern)
+                transformer=_TranslateTree(sco_type)).parse(pattern)
 
 
-def _convert_op(sco_type, prop, op, rhs, dialect):
+def _convert_op(sco_type, prop, op, rhs):
     orig_op = op
     neg, _, op = op.rpartition(' ')
     if op == 'ISSUBSET':
@@ -58,18 +58,16 @@ def _convert_op(sco_type, prop, op, rhs, dialect):
             rhs = f"'%\"{subprop}\":\"{rhs}\"%'"
         else:
             rhs = f"'%{rhs}%'"
-    if dialect == 'postgresql' and op == 'LIKE':
-        rhs = rhs.replace("\\", r"\\")  # PostgreSQL uses \ for escape with LIKE only!
     return f'"{prop}" {neg} {op} {rhs}'
 
 
-def comp2sql(sco_type, prop, op, value, dialect):
+def comp2sql(sco_type, prop, op, value):
     result = ''
     links = parse_prop(sco_type, prop)
     for link in reversed(links):
         if link[0] == 'node':
             from_type = link[1] or sco_type
-            result = _convert_op(from_type, link[2], op, value, dialect)
+            result = _convert_op(from_type, link[2], op, value)
         elif link[0] == 'rel':
             _, from_type, ref_name, to_type = link
             if ref_name.endswith('_refs'):
@@ -101,16 +99,15 @@ def path2sql(sco_type, path):
 class _TranslateTree(Transformer):
     """Transformer to convert relevant parts of STIX pattern to WHERE clause"""
 
-    def __init__(self, sco_type, dialect):
+    def __init__(self, sco_type):
         self.sco_type = sco_type
-        self.dialect = dialect
 
     def _make_comp(self, lhs, op, rhs):
         sco_type, _, prop = lhs.partition(':')
 
         # Ignore object paths that don't match table type
         if self.sco_type == sco_type:
-            return comp2sql(sco_type, prop, op, rhs, self.dialect)
+            return comp2sql(sco_type, prop, op, rhs)
         return ''
 
     def _make_exp(self, lhs, op, rhs):
