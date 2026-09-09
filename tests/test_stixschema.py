@@ -44,9 +44,26 @@ def test_observed_data_object_refs_are_native_list():
     assert column_type('observed-data', 'object_refs') == 'VARCHAR[]'
 
 
-def test_json_is_explicit_exception_not_default():
-    assert column_type('email-message', 'additional_header_fields') == 'JSON'
-    assert column_type('x509-certificate', 'x509_v3_extensions') == 'JSON'
+def test_known_email_and_x509_shapes_are_native():
+    assert column_type('email-message', 'additional_header_fields') == (
+        'MAP(VARCHAR, VARCHAR[])'
+    )
+    body = column_type('email-message', 'body_multipart')
+    assert body.startswith('STRUCT(')
+    assert body.endswith('[]')
+    assert '"body_raw_ref" VARCHAR' in body
+
+    x509 = column_type('x509-certificate', 'x509_v3_extensions')
+    assert x509.startswith('STRUCT(')
+    assert '"basic_constraints" VARCHAR' in x509
+    assert '"private_key_usage_period_not_before" TIMESTAMPTZ' in x509
+
+
+def test_json_is_exception_not_default():
+    process = column_type('process', 'extensions')
+    file_type = column_type('file', 'extensions')
+    assert '"startup_info" JSON' in process
+    assert '"exif_tags" JSON' in file_type
     assert column_type('file', 'not_a_stix_property') is None
 
 

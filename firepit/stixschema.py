@@ -1,8 +1,8 @@
 """DuckDB-native type definitions for the STIX 2.1 data model.
 
 Known STIX structure is represented with DuckDB scalar, LIST, MAP and STRUCT
-columns.  JSON is an explicit exception for fields whose values are genuinely
-heterogeneous or intentionally open-ended; it is not the default storage type.
+columns. JSON is an explicit exception for genuinely heterogeneous or
+open-ended values; it is not the default storage type.
 """
 
 from dataclasses import dataclass
@@ -60,14 +60,21 @@ def render_type(type_spec):
 
 HASHES = map_of('VARCHAR', 'VARCHAR')
 
+EMAIL_MIME_PART = struct({
+    'body': 'VARCHAR',
+    'body_raw_ref': 'VARCHAR',
+    'content_type': 'VARCHAR',
+    'content_disposition': 'VARCHAR',
+})
+
 WINDOWS_PROCESS_EXT = struct({
     'aslr_enabled': 'BOOLEAN',
     'dep_enabled': 'BOOLEAN',
     'priority': 'VARCHAR',
     'owner_sid': 'VARCHAR',
     'windows_title': 'VARCHAR',
-    # STARTUP_INFO is a named dictionary but its values are not constrained to
-    # one homogeneous scalar type by STIX.  Keep just this member as JSON.
+    # STARTUP_INFO is a defined dictionary, but its values are not constrained
+    # to one homogeneous scalar type by STIX.
     'startup_info': 'JSON',
     'integrity_level': 'VARCHAR',
 })
@@ -92,8 +99,6 @@ HTTP_REQUEST_EXT = struct({
     'request_method': 'VARCHAR',
     'request_value': 'VARCHAR',
     'request_version': 'VARCHAR',
-    # STIX 2.1 defines each HTTP header value as a list of strings so repeated
-    # header fields are preserved.
     'request_header': map_of('VARCHAR', list_of('VARCHAR')),
     'message_body_length': 'UBIGINT',
     'message_body_data_ref': 'VARCHAR',
@@ -154,9 +159,8 @@ RASTER_IMAGE_EXT = struct({
     'image_height': 'UBIGINT',
     'image_width': 'UBIGINT',
     'bits_per_pixel': 'UBIGINT',
-    # EXIF values are explicitly allowed to be either integer or string.  Until
-    # this is represented with a robust UNION conversion, retain this single
-    # heterogeneous dictionary as JSON.
+    # EXIF values are explicitly allowed to be integer or string. Keep this
+    # localized field as JSON until UNION conversion is implemented robustly.
     'exif_tags': 'JSON',
 })
 
@@ -235,34 +239,35 @@ USER_ACCOUNT_EXTENSIONS = struct({
     'unix-account-ext': UNIX_ACCOUNT_EXT,
 })
 
+X509_V3_EXTENSIONS = struct({
+    'basic_constraints': 'VARCHAR',
+    'name_constraints': 'VARCHAR',
+    'policy_constraints': 'VARCHAR',
+    'key_usage': 'VARCHAR',
+    'extended_key_usage': 'VARCHAR',
+    'subject_key_identifier': 'VARCHAR',
+    'authority_key_identifier': 'VARCHAR',
+    'subject_alternative_name': 'VARCHAR',
+    'issuer_alternative_name': 'VARCHAR',
+    'subject_directory_attributes': 'VARCHAR',
+    'crl_distribution_points': 'VARCHAR',
+    'inhibit_any_policy': 'VARCHAR',
+    'private_key_usage_period_not_before': 'TIMESTAMPTZ',
+    'private_key_usage_period_not_after': 'TIMESTAMPTZ',
+    'certificate_policies': 'VARCHAR',
+    'policy_mappings': 'VARCHAR',
+})
 
 SCO_TYPES = {
-    'artifact',
-    'autonomous-system',
-    'directory',
-    'domain-name',
-    'email-addr',
-    'email-message',
-    'file',
-    'ipv4-addr',
-    'ipv6-addr',
-    'mac-addr',
-    'mutex',
-    'network-traffic',
-    'process',
-    'software',
-    'url',
-    'user-account',
-    'windows-registry-key',
-    'x509-certificate',
+    'artifact', 'autonomous-system', 'directory', 'domain-name',
+    'email-addr', 'email-message', 'file', 'ipv4-addr', 'ipv6-addr',
+    'mac-addr', 'mutex', 'network-traffic', 'process', 'software', 'url',
+    'user-account', 'windows-registry-key', 'x509-certificate',
 }
-
 
 STIX_21_SCHEMAS = {
     'artifact': {
         'mime_type': 'VARCHAR',
-        # STIX carries payload_bin as base64 text.  Keep its lexical form rather
-        # than silently changing the storage API by decoding it into BLOB.
         'payload_bin': 'VARCHAR',
         'url': 'VARCHAR',
         'hashes': HASHES,
@@ -301,10 +306,9 @@ STIX_21_SCHEMAS = {
         'message_id': 'VARCHAR',
         'subject': 'VARCHAR',
         'received_lines': list_of('VARCHAR'),
-        # Header values may be scalar/list in historical data and connectors;
-        # retain this open dictionary as the explicit fallback.
-        'additional_header_fields': 'JSON',
+        'additional_header_fields': map_of('VARCHAR', list_of('VARCHAR')),
         'body': 'VARCHAR',
+        'body_multipart': list_of(EMAIL_MIME_PART),
         'raw_email_ref': 'VARCHAR',
     },
     'file': {
@@ -332,12 +336,8 @@ STIX_21_SCHEMAS = {
         'resolves_to_refs': list_of('VARCHAR'),
         'belongs_to_refs': list_of('VARCHAR'),
     },
-    'mac-addr': {
-        'value': 'VARCHAR',
-    },
-    'mutex': {
-        'name': 'VARCHAR',
-    },
+    'mac-addr': {'value': 'VARCHAR'},
+    'mutex': {'name': 'VARCHAR'},
     'network-traffic': {
         'start': 'TIMESTAMPTZ',
         'end': 'TIMESTAMPTZ',
@@ -375,9 +375,7 @@ STIX_21_SCHEMAS = {
         'vendor': 'VARCHAR',
         'version': 'VARCHAR',
     },
-    'url': {
-        'value': 'VARCHAR',
-    },
+    'url': {'value': 'VARCHAR'},
     'user-account': {
         'user_id': 'VARCHAR',
         'credential': 'VARCHAR',
@@ -419,11 +417,8 @@ STIX_21_SCHEMAS = {
         'subject_public_key_algorithm': 'VARCHAR',
         'subject_public_key_modulus': 'VARCHAR',
         'subject_public_key_exponent': 'UBIGINT',
-        # This dictionary has many optional members and is not yet modelled as
-        # its own STRUCT.  It remains an explicit, localized JSON exception.
-        'x509_v3_extensions': 'JSON',
+        'x509_v3_extensions': X509_V3_EXTENSIONS,
     },
-    # Firepit stores these SDO/SRO objects alongside SCO tables.
     'identity': {
         'identity_class': 'VARCHAR',
         'name': 'VARCHAR',
