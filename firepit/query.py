@@ -149,12 +149,19 @@ class BinnedColumn(Column):
                 # PostgreSQL
                 dt = f'to_timestamp((FLOOR(EXTRACT(epoch from {col}::timestamp)/{bin_size})*{bin_size}))'
                 return f'to_char({dt}, \'yyyy-MM-dd"T"HH24:MI:SS"Z"\') AS "{alias}"'
+            if dialect == 'duckdb':
+                dt = f'to_timestamp(floor(epoch(CAST({col} AS TIMESTAMP))/{bin_size})*{bin_size})'
+                return f'strftime({dt}, \'%Y-%m-%dT%H:%M:%SZ\') AS "{alias}"'
             # sqlite3
             dt = f"datetime(strftime('%s', {col})/{bin_size}*{bin_size}, 'unixepoch')"
             return f'strftime(\'%Y-%m-%dT%H:%M:%SZ\', {dt}) AS "{alias}"'
         # else we assume it's some numeric column
         bin_size = self.n
-        return f'{col}/{bin_size}*{bin_size} AS "{alias}"'
+        # DuckDB's `/` is always float division regardless of operand
+        # types (SQLite's and PostgreSQL's truncate for integer
+        # columns), so it needs integer division here instead.
+        op = '//' if dialect == 'duckdb' else '/'
+        return f'{col}{op}{bin_size}*{bin_size} AS "{alias}"'
 
 
 class Predicate:

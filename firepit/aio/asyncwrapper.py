@@ -1,6 +1,8 @@
 import logging
 import os
 
+from urllib.parse import urlparse
+
 import ujson
 
 from firepit.aio.asyncstorage import AsyncStorage
@@ -35,13 +37,24 @@ class SyncWrapper(AsyncStorage):
 
     async def create(self, ssl_context=None):
         """
-        Create a new "session" (SQLite3 file).  Fail if it already exists.
+        Create a new "session".  Fail if it already exists.
         """
-        # Fail if it already exists
-        if os.path.exists(self.connstring):
-            raise SessionExists(self.connstring)
-        logger.debug('Creating storage for session %s', self.session_id)
-        self.store = get_storage(self.connstring)
+        if self.connstring.startswith('duckdb://'):
+            # DuckDB's session model is schema-per-file, like
+            # PostgreSQL's, not SQLite's one-file-per-session -- "the
+            # file exists" doesn't mean "the session exists".
+            from firepit import duckdbstorage
+            path = urlparse(self.connstring).path
+            if duckdbstorage.session_exists(path, self.session_id):
+                raise SessionExists(self.session_id or path)
+            logger.debug('Creating storage for session %s', self.session_id)
+            self.store = duckdbstorage.get_storage(path, self.session_id)
+        else:
+            # Fail if it already exists
+            if os.path.exists(self.connstring):
+                raise SessionExists(self.connstring)
+            logger.debug('Creating storage for session %s', self.session_id)
+            self.store = get_storage(self.connstring)
         self.conn = self.store.connection
         self.placeholder = self.store.placeholder
         self.dialect = self.store.dialect
@@ -50,11 +63,19 @@ class SyncWrapper(AsyncStorage):
         """
         Attach/connect to an existing session.  Fail if it doesn't exist.
         """
-        # Fail if it doesn't exist
-        if not os.path.isfile(self.connstring):
-            raise SessionNotFound(self.connstring)
-        logger.debug('Attaching to storage for session %s', self.session_id)
-        self.store = get_storage(self.connstring)
+        if self.connstring.startswith('duckdb://'):
+            from firepit import duckdbstorage
+            path = urlparse(self.connstring).path
+            if not duckdbstorage.session_exists(path, self.session_id):
+                raise SessionNotFound(self.session_id or path)
+            logger.debug('Attaching to storage for session %s', self.session_id)
+            self.store = duckdbstorage.get_storage(path, self.session_id)
+        else:
+            # Fail if it doesn't exist
+            if not os.path.isfile(self.connstring):
+                raise SessionNotFound(self.connstring)
+            logger.debug('Attaching to storage for session %s', self.session_id)
+            self.store = get_storage(self.connstring)
         self.conn = self.store.connection
         self.placeholder = self.store.placeholder
         self.dialect = self.store.dialect
@@ -158,8 +179,12 @@ class SyncWrapper(AsyncStorage):
             else:
                 action = 'NOTHING'
             stmt += f' ON CONFLICT (id) DO {action}'
-        else:
-            stmt += ' ON CONFLICT DO NOTHING'
+        # else: no ON CONFLICT here, matching SqlStorage.upsert() --
+        # id-less tables like __contains have no UNIQUE/PK constraint
+        # for a conflict target to reference.  Under SQLite this was
+        # a no-op (nothing to ever conflict on); under DuckDB it's a
+        # hard error ("no UNIQUE/PRIMARY KEY constraints... specify
+        # ON CONFLICT columns manually").
         values = tuple([ujson.dumps(i[1], ensure_ascii=False)
                         if isinstance(i[1], list) else i[1] for i in pairs])
         #logger.debug('_upsert: "%s", %s', stmt, values)

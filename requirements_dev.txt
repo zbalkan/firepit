@@ -18,3 +18,4 @@ pyinstrument
 psycopg2-binary
 asyncpg
 pandas
+duckdb

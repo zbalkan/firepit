@@ -607,7 +607,17 @@ class SqlStorage:
         #       and it breaks sorting by referenced properties.
         viewdef = self._get_view_def(viewname)
         logger.debug('viewname %s: %s', viewname, viewdef)
-        match = re.search(r"ORDER BY \"([a-z0-9:'\._\-]*)\" (ASC|DESC)$", viewdef)
+        # The quotes around the column name are optional: DuckDB
+        # re-serializes stored view definitions and drops them for
+        # identifiers that don't need quoting (SQLite/PostgreSQL
+        # store what was submitted, which is always quoted).  Exclude
+        # a `tmp.`-prefixed capture: that's the fixed alias
+        # _create_view's self-referential-view rewrite substitutes in
+        # for `viewname`, not a real column reference, and DuckDB's
+        # unquoted-identifier serialization is what makes it visible
+        # to this regex at all -- SQLite's verbatim, always-quoted
+        # storage never produced a matchable "tmp.col" here.
+        match = re.search(r"ORDER BY (?!tmp\.)\"?([a-z0-9:'\._\-]*)\"? (ASC|DESC)$", viewdef)
         if match:
             if "_ref." in match.group(1):
                 # Don't add viewname for ref'ed props because they may

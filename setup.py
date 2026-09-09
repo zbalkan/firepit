@@ -26,7 +26,8 @@ test_requirements = ['pytest>=3',]
 
 extras_requirements = {
     'postgres': ['psycopg2-binary'],
-    'async-postgres': ['asyncpg']
+    'async-postgres': ['asyncpg'],
+    'duckdb': ['duckdb'],
 }
 
 setup(

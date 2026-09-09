@@ -21,6 +21,14 @@ def get_async_storage(connstring, session_id=None):
     if url.scheme == 'postgresql':
         module = import_module('firepit.aio.asyncpgstorage')
         return module.get_storage(connstring, session_id)
+    if url.scheme == 'duckdb':
+        # DuckDBStorage is a synchronous SqlStorage subclass, same as
+        # SQLiteStorage, so it's wrapped the same way -- but unlike
+        # SQLite's one-file-per-session model, "does the file exist"
+        # isn't "does the session exist", so SyncWrapper needs the
+        # scheme (kept in the full connstring here, where SQLite gets
+        # a bare path) to know which check create()/attach() need.
+        return SyncWrapper(connstring, session_id)
     if url.scheme in ['sqlite3', '']:
         return SyncWrapper(url.path, session_id)
     raise NotImplementedError(url.scheme)

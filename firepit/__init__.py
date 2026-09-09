@@ -24,6 +24,9 @@ def get_storage(url, session_id=None):
     if url.scheme == 'postgresql':
         module = import_module('firepit.pgstorage')
         return module.get_storage(url, session_id)
+    if url.scheme == 'duckdb':
+        module = import_module('firepit.duckdbstorage')
+        return module.get_storage(url.path, session_id)
     if url.scheme in ['sqlite3', '']:
         module = import_module('firepit.sqlitestorage')
         return module.get_storage(url.path)
