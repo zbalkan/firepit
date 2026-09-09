@@ -275,10 +275,9 @@ class DuckDBStorage:
             (qid, source, stix_pattern, native_query),
         )
 
-    def cache(self, query_id, bundles, batchsize=2000, source=None,
-              stix_pattern=None, native_query=None, **_kwargs):
+    def cache(self, query_id, bundles, source=None,
+              stix_pattern=None, native_query=None):
         """Ingest raw STIX 2.1 JSON and record acquisition provenance."""
-        del batchsize
         if not isinstance(bundles, list):
             bundles = [bundles]
         bundle_texts = [_bundle_text(bundle) for bundle in bundles]
@@ -327,19 +326,3 @@ class DuckDBStorage:
 
 def get_storage(path, session_id=None):
     return DuckDBStorage(path, session_id)
-
-
-def session_exists(path, session_id=None):
-    if not os.path.exists(path):
-        return False
-    session_id = session_id or "main"
-    raw = duckdb.connect(path)
-    try:
-        row = raw.execute(
-            "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = ? AND table_name = '__metadata'",
-            (session_id,),
-        ).fetchone()
-        return row is not None
-    finally:
-        raw.close()
