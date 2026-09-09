@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "firepit"
-version = "2.3.35"
+version = "3.0.0"
 description = "DuckDB-native storage utilities for STIX 2.1 data."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11,<3.15"
@@ -33,13 +33,6 @@ dependencies = [
 test = [
     "pytest>=8",
     "pytest-cov",
-    "tox>=4",
-]
-lint = [
-    "bandit",
-    "flake8",
-    "pylint",
-    "safety",
 ]
 release = [
     "build",

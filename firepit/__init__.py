@@ -2,7 +2,7 @@
 
 __author__ = "IBM Security"
 __email__ = "pcoccoli@us.ibm.com"
-__version__ = "2.3.35"
+__version__ = "3.0.0"
 
 from firepit.storage import get_storage as _get_storage
 from firepit.storageurl import storage_path
