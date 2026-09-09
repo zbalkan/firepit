@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from firepit import get_storage
 
 
@@ -58,7 +60,11 @@ def test_summary_uses_native_object_refs(tmpdir):
         store.cache("q1", _bundle())
         summary = store.summary("ipv4-addr", "value", "192.0.2.25")
         assert summary["number_observed"] == 5
-        assert str(summary["first_observed"]).startswith("2026-09-09 10:00:00")
-        assert str(summary["last_observed"]).startswith("2026-09-09 11:02:00")
+        assert summary["first_observed"].astimezone(timezone.utc) == datetime(
+            2026, 9, 9, 10, 0, tzinfo=timezone.utc
+        )
+        assert summary["last_observed"].astimezone(timezone.utc) == datetime(
+            2026, 9, 9, 11, 2, tzinfo=timezone.utc
+        )
     finally:
         store.close()
