@@ -1,37 +1,14 @@
 #!/usr/bin/env python
 
-"""
-Raft: Streaming processing of STIX Observation SDOs (`observed-data`).
-"""
+"""Streaming helpers for local STIX bundle input."""
 
 from collections import OrderedDict
 from collections import defaultdict
 
 import ijson
-import requests
 import ujson
 
 from firepit import stix21
-
-
-class GeneratorIO:
-    '''Convert a generator into a file-like object'''
-
-    def __init__(self, gen):
-        self.gen = gen
-        self.buf = b''
-
-    def read(self, n):
-        result = b''
-        try:
-            while n > len(self.buf):
-                self.buf += next(self.gen)
-            result = self.buf[:n]
-            self.buf = self.buf[n:]
-        except StopIteration:
-            result = self.buf
-            self.buf = b''
-        return result
 
 
 def _get_objects(fp, types):
@@ -52,14 +29,13 @@ def _yield_objects(bundle, types):
 
 
 def get_objects(source, types=None):
-    '''A generator function that yields STIX objects from source'''
+    """Yield STIX objects from an in-memory bundle, file-like object or file path.
+
+    Remote acquisition intentionally does not live in Firepit. Authentication,
+    HTTP, retries, paging and STIX-Shifter orchestration belong in the caller.
+    """
     if isinstance(source, dict):
-        for obj in source.get('objects', []):
-            yield obj
-    elif source.startswith('http'):
-        response = requests.get(source, stream=True)
-        fp = GeneratorIO(response.iter_content(chunk_size=8192))
-        yield from _get_objects(fp, types)
+        yield from _yield_objects(source, types)
     elif hasattr(source, 'read'):
         yield from _get_objects(source, types)
     else:
@@ -75,10 +51,10 @@ def _set_id(obs):
 
 
 def json_normalize(d, prefix='', sep='.', flat_lists=False):
-    r = OrderedDict()  # {}
+    r = OrderedDict()
     otype = d.get('type', '')
     for k, v in d.items():
-        if '-' in k:  # Weird STIX rule: single quotes around things like SHA-1
+        if '-' in k:
             if ':' in k:
                 otype, _, path = k.rpartition(':')
                 parts = path.split('.')
@@ -90,7 +66,6 @@ def json_normalize(d, prefix='', sep='.', flat_lists=False):
         if prefix:
             key = f'{prefix}{sep}{key}'
         if k == 'extensions' or (isinstance(v, dict) and not (isinstance(otype, str) and otype.startswith('x-'))):
-            # Don't recurse for custom SCO objects
             r.update(json_normalize(v, key, sep, flat_lists))
         elif flat_lists and isinstance(v, list):
             for i, val in enumerate(v):
@@ -101,9 +76,7 @@ def json_normalize(d, prefix='', sep='.', flat_lists=False):
 
 
 def upgrade_2021(obs):
-    """
-    Upgrade a 2.0 observation to a 2.1 observation
-    """
+    """Upgrade a STIX 2.0 observation to a STIX 2.1-shaped observation."""
     results = [obs]
     if 'objects' not in obs:
         return results
@@ -111,7 +84,6 @@ def upgrade_2021(obs):
     object_refs = set()
     ref_map = {}
     for idx, sco in scos.items():
-        # Assign a STIX 2.1-style identifier
         sid = _set_id(sco)
         ref_map[idx] = sid
         object_refs.add(sid)
@@ -120,24 +92,21 @@ def upgrade_2021(obs):
             sco['image_ref'] = sco.pop('binary_ref')
         results.append(sco)
 
-    # Resolve 2.0-style refs to new style
-    for obj in results:  # Includes SDOs, SCOs, and SROs
+    for obj in results:
         if obj['type'] == 'relationship':
             continue
-
-        for prop, val in obj.items():
+        for prop, val in list(obj.items()):
             if prop.endswith('_ref'):
                 if val.isdigit():
                     obj[prop] = ref_map[val]
             elif prop.endswith('_refs'):
                 refs = []
                 if isinstance(val, list):
-                    for i in val:
-                        if i.isdigit():
-                            refs.append(ref_map[i])
-                else:
-                    if val.isdigit():
-                        refs.append(ref_map[val])
+                    for item in val:
+                        if item.isdigit():
+                            refs.append(ref_map[item])
+                elif val.isdigit():
+                    refs.append(ref_map[val])
                 if refs:
                     obj[prop] = refs
                 else:
@@ -146,116 +115,90 @@ def upgrade_2021(obs):
     del obs['objects']
     obs['object_refs'] = list(object_refs)
     obs['spec_version'] = '2.1'
-
     return results
 
 
 def _rank(results, sco_id, rank):
-    """Set rank on __contains relationship for SCO"""
     for result in results:
         if result['type'] == '__contains' and result['target_ref'] == sco_id:
             result['x_firepit_rank'] = rank
 
 
-
 def flatten_21(obj):
-    """
-    For STIX 2.1 objects, "flatten" references
-    """
+    """Legacy compatibility flattening for STIX 2.1 objects."""
     results = []
     oid = str(obj['id'])
-    obj['id'] = oid  # Ensure it's a plain string
+    obj['id'] = oid
 
     obj_type = obj['type']
     if obj_type == 'identity':
         return [obj]
-    elif obj_type == 'observed-data':
+    if obj_type == 'observed-data':
         for ref in obj['object_refs']:
-            # Append pseudo-relationship for "Object CONTAINS Object"
             results.append({
                 'type': '__contains',
                 'source_ref': oid,
-                'target_ref': str(ref)
+                'target_ref': str(ref),
             })
         del obj['object_refs']
         results.append(json_normalize(obj, flat_lists=False))
         return results
 
-    # Create SRO for ref lists
     ref_lists = []
     for prop, val in obj.items():
         if prop.endswith('_ref'):
-            obj[prop] = str(val)  # Ensure it's a plain string
+            obj[prop] = str(val)
         elif prop.endswith('_refs'):
             if not isinstance(val, list):
                 val = [val]
             for ref in val:
-                ref = str(ref)  # Ensure it's a plain string
-                if ref != oid:  # Avoid bogus references
-                    sro = {
+                ref = str(ref)
+                if ref != oid:
+                    results.append({
                         'type': '__reflist',
                         'ref_name': prop,
                         'source_ref': oid,
-                        'target_ref': ref
-                    }
-                    results.append(sro)
-
-            # Store prop name to remove later
+                        'target_ref': ref,
+                    })
             ref_lists.append(prop)
 
     for prop in ref_lists:
         del obj[prop]
     results.append(json_normalize(obj, flat_lists=False))
-
     return results
 
 
 def flatten(obs):
-    """
-    Convert ref lists to objects, add ids if missing, etc.
-    """
+    """Legacy relational flattening retained until native storage cutover."""
     if obs.get('spec_version', '2.0') == '2.1' or 'object_refs' in obs:
         return flatten_21(obs)
-
     if 'objects' not in obs:
         return [obs]
 
     scos = obs['objects']
     ref_map = {}
     results = []
-
-    # Keep track of the preference order of each reffed object, by type
     prefs = defaultdict(list)
     reffed = set()
 
     for idx, orig_sco in scos.items():
         sco = json_normalize(orig_sco, flat_lists=False)
-
-        # Put SCO at end of pref list
         prefs[sco['type']].append(idx)
-
-        # Assign a STIX 2.1-style identifier
         sid = stix21.makeid(orig_sco, obs)
         orig_sco['id'] = sid
         sco['id'] = sid
         ref_map[idx] = sid
 
-        # Create SRO for ref lists
         ref_lists = []
         for prop, val in sco.items():
             if prop.endswith('_ref'):
-                # markroot stuff
-                if val in scos and val != idx:  # Avoid bogus references
-                    # If an object refs another object of the same type,
-                    # only mark the root (think process:parent_ref)
+                if val in scos and val != idx:
                     if scos[idx]['type'] == scos[val]['type']:
                         _mark_tree(scos, val, reffed)
                     elif scos[val]['type'].endswith('-addr'):
                         if 'dst_' in prop:
-                            # For src/dst pairs, consider the src as the root (so add dst to reffed)
                             reffed.add(val)
                         elif prop.endswith('src_ref'):
-                            # Save ref as the "preferred" object for this type
                             prefs[scos[val]['type']].insert(0, val)
                     elif val in reffed:
                         reffed.add(idx)
@@ -263,51 +206,37 @@ def flatten(obs):
                 if not isinstance(val, list):
                     val = [val]
                 for ref in val:
-                    if ref in scos and ref != idx:  # Avoid bogus references
-                        # We'll replace these indices later
-                        sro = {
+                    if ref in scos and ref != idx:
+                        results.append({
                             'type': '__reflist',
                             'ref_name': prop,
                             'source_ref': idx,
-                            'target_ref': ref
-                        }
-                        results.append(sro)
-
-                        # markroot stuff
+                            'target_ref': ref,
+                        })
                         if scos[idx]['type'] == scos[ref]['type']:
                             reffed.add(ref)
-
-                # Store prop name to remove later
                 ref_lists.append(prop)
 
         for prop in ref_lists:
             del sco[prop]
 
-        # Append pseudo-relationship for "Observtion CONTAINS SCO"
         results.append({
             'type': '__contains',
             'source_ref': obs['id'],
-            'target_ref': sco['id']
+            'target_ref': sco['id'],
         })
-
-        # calc distance?
-
-        #TODO: if sco in results already, update?
         results.append(sco)
 
-    # Resolve 2.0-style refs to new style
-    for obj in results:  # Includes SDOs, SCOs, and SROs
+    for obj in results:
         if obj['type'] in ('__contains', 'relationship'):
             continue
         invalid = []
         for prop, val in obj.items():
             if prop.endswith('_ref'):
                 if val not in ref_map:
-                    invalid.append(prop)  # Reference not found
+                    invalid.append(prop)
                 else:
                     obj[prop] = ref_map[val]
-
-        # Remove any unresolvable reference props
         for prop in invalid:
             del obj[prop]
 
@@ -317,20 +246,18 @@ def flatten(obs):
             if sid == obj.get('id'):
                 k = idx
         if k and k not in reffed:
-            # Check if there's a more preferred object
             if obj_type not in prefs:
                 _rank(results, scos[k]['id'], 1)
             else:
-                for i in prefs[obj_type]:
-                    if i in reffed:
+                for item in prefs[obj_type]:
+                    if item in reffed:
                         continue
-                    elif i == k:
+                    if item == k:
                         _rank(results, scos[k]['id'], 1)
                     break
 
     del obs['objects']
     results.append(json_normalize(obs, flat_lists=False))
-
     return results
 
 

@@ -30,22 +30,14 @@ dependencies = [
     "duckdb",
     "ijson",
     "lark",
-    "python-dateutil",
-    "requests",
     "tabulate",
     "typer",
     "ujson",
 ]
 
 [project.optional-dependencies]
-# Temporary: the legacy AIO compatibility path still imports pandas.
-aio = [
-    "pandas",
-]
 test = [
-    "pandas",
     "pytest>=8",
-    "pytest-asyncio",
     "pytest-cov",
     "stix2",
     "tox>=4",
@@ -63,7 +55,6 @@ release = [
 
 [project.scripts]
 firepit = "firepit.cli:app"
-splint = "firepit.splint:app"
 
 [project.urls]
 Homepage = "https://github.com/zbalkan/firepit"

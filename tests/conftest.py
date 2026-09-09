@@ -1,7 +1,6 @@
 import os
-import pytest
 
-collect_ignore = ['setup.py']
+import pytest
 
 
 @pytest.fixture
@@ -33,7 +32,7 @@ def fake_bundle_list():
     cwd = os.path.dirname(os.path.abspath(__file__))
     return [
         os.path.join(cwd, 'conn_a.json'),
-        os.path.join(cwd, 'conn_b.json')
+        os.path.join(cwd, 'conn_b.json'),
     ]
 
 
