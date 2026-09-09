@@ -14,47 +14,23 @@ def _bundle():
         "objects": [
             {"type": "ipv4-addr", "spec_version": "2.1", "id": src, "value": "192.0.2.10"},
             {"type": "ipv6-addr", "spec_version": "2.1", "id": dst, "value": "2001:db8::10"},
+            {"type": "user-account", "spec_version": "2.1", "id": user, "account_login": "alice"},
+            {"type": "process", "spec_version": "2.1", "id": parent, "pid": 100, "command_line": "parent.exe"},
             {
-                "type": "user-account",
-                "spec_version": "2.1",
-                "id": user,
-                "account_login": "alice",
+                "type": "process", "spec_version": "2.1", "id": child,
+                "pid": 200, "command_line": "child.exe", "parent_ref": parent,
+                "creator_user_ref": user, "opened_connection_refs": [conn],
             },
             {
-                "type": "process",
-                "spec_version": "2.1",
-                "id": parent,
-                "pid": 100,
-                "command_line": "parent.exe",
+                "type": "network-traffic", "spec_version": "2.1", "id": conn,
+                "src_ref": src, "dst_ref": dst, "src_port": 50000,
+                "dst_port": 443, "protocols": ["tcp"],
             },
             {
-                "type": "process",
-                "spec_version": "2.1",
-                "id": child,
-                "pid": 200,
-                "command_line": "child.exe",
-                "parent_ref": parent,
-                "creator_user_ref": user,
-                "opened_connection_refs": [conn],
-            },
-            {
-                "type": "network-traffic",
-                "spec_version": "2.1",
-                "id": conn,
-                "src_ref": src,
-                "dst_ref": dst,
-                "src_port": 50000,
-                "dst_port": 443,
-                "protocols": ["tcp"],
-            },
-            {
-                "type": "observed-data",
-                "spec_version": "2.1",
-                "id": obs,
+                "type": "observed-data", "spec_version": "2.1", "id": obs,
                 "first_observed": "2026-09-09T10:00:00Z",
                 "last_observed": "2026-09-09T10:01:00Z",
-                "number_observed": 2,
-                "object_refs": [child, conn],
+                "number_observed": 2, "object_refs": [child, conn],
             },
         ],
     }
@@ -64,19 +40,14 @@ def test_native_reference_lists_are_canonical(tmpdir):
     store = get_storage(str(tmpdir.join("refs.duckdb")), "hunt")
     try:
         store.cache("q1", _bundle())
-        process = store._query(
+        assert len(store.connection.execute(
             'SELECT opened_connection_refs FROM "process" WHERE pid = 200'
-        ).fetchone()
-        assert len(process["opened_connection_refs"]) == 1
-
-        obs = store._query(
+        ).fetchone()[0]) == 1
+        assert len(store.connection.execute(
             'SELECT object_refs FROM "observed-data"'
-        ).fetchone()
-        assert len(obs["object_refs"]) == 2
-
+        ).fetchone()[0]) == 2
         internal = {
-            row["table_name"]
-            for row in store._query(
+            row[0] for row in store.connection.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
                 ("hunt",),
             ).fetchall()
@@ -91,11 +62,11 @@ def test_observation_ref_view_expands_object_refs(tmpdir):
     store = get_storage(str(tmpdir.join("refs.duckdb")), "hunt")
     try:
         store.cache("q1", _bundle())
-        rows = store._query(
+        rows = store.connection.execute(
             'SELECT object_ref, number_observed FROM "observation_ref" ORDER BY object_ref'
         ).fetchall()
         assert len(rows) == 2
-        assert {row["number_observed"] for row in rows} == {2}
+        assert {row[1] for row in rows} == {2}
     finally:
         store.close()
 
@@ -104,35 +75,28 @@ def test_explicit_process_and_network_views(tmpdir):
     store = get_storage(str(tmpdir.join("views.duckdb")), "hunt")
     try:
         store.cache("q1", _bundle())
-        process = store._query(
+        process = store.connection.execute(
             'SELECT parent_pid, parent_command_line, user_name '
             'FROM "stixv_process" WHERE pid = 200'
         ).fetchone()
-        assert process == {
-            "parent_pid": 100,
-            "parent_command_line": "parent.exe",
-            "user_name": "alice",
-        }
+        assert process == (100, "parent.exe", "alice")
 
-        network = store._query(
+        network = store.connection.execute(
             'SELECT src_ipv4, src_ipv6, dst_ipv4, dst_ipv6 '
             'FROM "stixv_network_traffic"'
         ).fetchone()
-        assert network["src_ipv4"] == "192.0.2.10"
-        assert network["src_ipv6"] is None
-        assert network["dst_ipv4"] is None
-        assert network["dst_ipv6"] == "2001:db8::10"
+        assert network == ("192.0.2.10", None, None, "2001:db8::10")
     finally:
         store.close()
 
 
-def test_lookup_does_not_auto_dereference(tmpdir):
+def test_base_table_queries_do_not_auto_dereference(tmpdir):
     store = get_storage(str(tmpdir.join("lookup.duckdb")), "hunt")
     try:
         store.cache("q1", _bundle())
-        row = next(item for item in store.lookup("process") if item["pid"] == 200)
-        assert row["parent_ref"].startswith("process--")
-        assert "parent_ref.pid" not in row
-        assert "parent_pid" not in row
+        row = store.connection.execute(
+            'SELECT parent_ref FROM "process" WHERE pid = 200'
+        ).fetchone()
+        assert row[0].startswith("process--")
     finally:
         store.close()

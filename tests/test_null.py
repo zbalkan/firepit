@@ -34,15 +34,15 @@ def test_reingest_missing_known_field_does_not_clobber_value(tmpdir):
             ),
         )
 
-        row = store._query(
+        row = store.connection.execute(
             'SELECT name FROM "identity" WHERE id = ?', (identity_id,)
         ).fetchone()
-        assert row["name"] == "Example"
+        assert row[0] == "Example"
 
-        row = store._query(
-            "SELECT COUNT(*) AS count FROM raw_bundle "
+        row = store.connection.execute(
+            "SELECT COUNT(*) FROM raw_bundle "
             "WHERE json_extract_string(bundle, '$.objects[0].x_extra') = 'foo'"
         ).fetchone()
-        assert row["count"] == 1
+        assert row[0] == 1
     finally:
         store.close()

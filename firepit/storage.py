@@ -13,13 +13,13 @@ import uuid
 
 import duckdb
 
-from firepit.exceptions import InvalidAttr, InvalidObject, UnknownViewname
+from firepit.exceptions import InvalidObject
 from firepit.stixschema import rendered_schema
 from firepit.validate import validate_name
 from firepit.views import install_views
 
 _NATIVE_META = "duckdb_native_model"
-_NATIVE_VERSION = "5"
+_NATIVE_VERSION = "6"
 _NESTED_PREFIXES = ("MAP(", "STRUCT(")
 
 
@@ -36,14 +36,15 @@ def _is_nested(dtype: str) -> bool:
 
 
 def _json_projection(source: str, name: str, dtype: str) -> str:
+    """Project one known STIX property into its declared DuckDB type."""
     path = _json_path(name)
     if dtype == "VARCHAR":
         return f"json_extract_string({source}, '{path}')"
     if dtype == "JSON":
         return f"json_extract({source}, '{path}')"
     if _is_nested(dtype):
-        return f"TRY_CAST(json_extract({source}, '{path}') AS {dtype})"
-    return f"TRY_CAST(json_extract_string({source}, '{path}') AS {dtype})"
+        return f"CAST(json_extract({source}, '{path}') AS {dtype})"
+    return f"CAST(json_extract_string({source}, '{path}') AS {dtype})"
 
 
 def _bundle_text(bundle) -> str:
@@ -63,32 +64,8 @@ def _bundle_text(bundle) -> str:
     raise TypeError("bundle must be a dict, JSON string, file-like object, or path")
 
 
-class Result:
-    """Small dict-row wrapper for the transitional Python API."""
-
-    def __init__(self, columns=(), rows=()):
-        self._columns = tuple(columns)
-        self._rows = list(rows)
-        self._pos = 0
-
-    def fetchone(self):
-        if self._pos >= len(self._rows):
-            return None
-        row = self._rows[self._pos]
-        self._pos += 1
-        return dict(zip(self._columns, row))
-
-    def fetchall(self):
-        rows = self._rows[self._pos:]
-        self._pos = len(self._rows)
-        return [dict(zip(self._columns, row)) for row in rows]
-
-    def close(self):
-        self._pos = len(self._rows)
-
-
 class DuckDBStorage:
-    placeholder = "?"
+    """A narrow STIX 2.1 ingestion layer over one DuckDB schema."""
 
     def __init__(self, dbname, session_id=None):
         self.dbname = os.fspath(dbname)
@@ -106,72 +83,70 @@ class DuckDBStorage:
     def close(self):
         self.connection.close()
 
-    def _result(self):
-        description = self.connection.description or ()
-        columns = [item[0] for item in description]
-        rows = self.connection.fetchall() if description else []
-        return Result(columns, rows)
-
-    def _execute(self, statement, values=None):
-        try:
-            self.connection.execute(statement, values or ())
-        except duckdb.BinderException as exc:
-            raise InvalidAttr(str(exc)) from exc
-        except duckdb.CatalogException as exc:
-            msg = str(exc)
-            if "does not exist" in msg and ("Table" in msg or "View" in msg):
-                raise UnknownViewname(msg) from exc
-            raise
-        return self._result()
-
-    def _query(self, statement, values=None):
-        return self._execute(statement, values)
-
     def _prepare_native_model(self):
-        self.connection.execute(
-            'CREATE TABLE IF NOT EXISTS "__metadata" '
-            '(name VARCHAR PRIMARY KEY, value VARCHAR)'
-        )
-        row = self.connection.execute(
-            'SELECT value FROM "__metadata" WHERE name = ?', (_NATIVE_META,)
-        ).fetchone()
-        if row and row[0] != _NATIVE_VERSION:
-            raise RuntimeError(
-                f"unsupported native storage version {row[0]}; "
-                "create a new Firepit session/database"
-            )
+        existing = {
+            row[0]
+            for row in self.connection.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = ? AND table_type = 'BASE TABLE'",
+                (self.session_id,),
+            ).fetchall()
+        }
 
-        self.connection.execute(
-            'CREATE TABLE IF NOT EXISTS "raw_query" ('
-            'query_id VARCHAR PRIMARY KEY, source VARCHAR, stix_pattern VARCHAR, '
-            'native_query VARCHAR, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, '
-            'status VARCHAR, result_count UBIGINT, error VARCHAR)'
-        )
-        self.connection.execute(
-            'CREATE TABLE IF NOT EXISTS "raw_bundle" ('
-            'bundle_id UUID PRIMARY KEY, query_id VARCHAR, received_at TIMESTAMPTZ, '
-            'bundle JSON)'
-        )
-        self.connection.execute(
-            'CREATE TABLE IF NOT EXISTS "raw_run_object" ('
-            'query_id VARCHAR, object_id VARCHAR)'
-        )
-        if not row:
+        if existing:
+            if "__metadata" not in existing:
+                raise RuntimeError(
+                    "existing Firepit session is not a native DuckDB model; "
+                    "create a new database/session"
+                )
+            row = self.connection.execute(
+                'SELECT value FROM "__metadata" WHERE name = ?', (_NATIVE_META,)
+            ).fetchone()
+            if not row:
+                raise RuntimeError(
+                    "pre-native Firepit session is not supported; "
+                    "create a new database/session"
+                )
+            if row[0] != _NATIVE_VERSION:
+                raise RuntimeError(
+                    f"unsupported native storage version {row[0]}; "
+                    "create a new database/session"
+                )
+        else:
+            self.connection.execute(
+                'CREATE TABLE "__metadata" '
+                '(name VARCHAR PRIMARY KEY, value VARCHAR)'
+            )
             self.connection.execute(
                 'INSERT INTO "__metadata" (name, value) VALUES (?, ?)',
                 (_NATIVE_META, _NATIVE_VERSION),
+            )
+            self.connection.execute(
+                'CREATE TABLE "raw_query" ('
+                'query_id VARCHAR PRIMARY KEY, source VARCHAR, stix_pattern VARCHAR, '
+                'native_query VARCHAR, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, '
+                'status VARCHAR, result_count UBIGINT, error VARCHAR)'
+            )
+            self.connection.execute(
+                'CREATE TABLE "raw_bundle" ('
+                'bundle_id UUID PRIMARY KEY, query_id VARCHAR, received_at TIMESTAMPTZ, '
+                'bundle JSON)'
+            )
+            self.connection.execute(
+                'CREATE TABLE "raw_run_object" ('
+                'query_id VARCHAR, object_id VARCHAR, '
+                'UNIQUE(query_id, object_id))'
             )
 
         self._create_native_table("identity")
         self._create_native_table("observed-data")
 
     def _table_exists(self, obj_type):
-        row = self.connection.execute(
+        return self.connection.execute(
             "SELECT 1 FROM information_schema.tables "
             "WHERE table_schema = ? AND table_name = ? AND table_type = 'BASE TABLE'",
             (self.session_id, obj_type),
-        ).fetchone()
-        return row is not None
+        ).fetchone() is not None
 
     def _create_native_table(self, obj_type):
         validate_name(obj_type)
@@ -199,6 +174,7 @@ class DuckDBStorage:
 
         row = self.connection.execute(
             "SELECT "
+            "COUNT(*) FILTER (WHERE json_extract_string(value, '$.id') IS NULL) AS missing_id, "
             "COUNT(*) FILTER (WHERE json_extract_string(value, '$.spec_version') "
             "IS NOT NULL AND json_extract_string(value, '$.spec_version') <> '2.1') AS old_version, "
             "COUNT(*) FILTER (WHERE json_extract_string(value, '$.type') = 'observed-data' "
@@ -210,29 +186,35 @@ class DuckDBStorage:
             (bundle_text,),
         ).fetchone()
         if row[0]:
-            raise InvalidObject("Firepit accepts STIX 2.1 only")
+            raise InvalidObject("every STIX object must provide id")
         if row[1]:
+            raise InvalidObject("Firepit accepts STIX 2.1 only")
+        if row[2]:
             raise InvalidObject(
                 "embedded observed-data.objects is not supported; "
                 "provide STIX 2.1 observed-data.object_refs"
             )
-        if row[2]:
+        if row[3]:
             raise InvalidObject("observed-data must provide object_refs")
 
     def _object_types(self, bundle_text: str):
-        rows = self.connection.execute(
-            "SELECT DISTINCT json_extract_string(value, '$.type') AS obj_type "
-            "FROM json_each(?::JSON, '$.objects') "
-            "WHERE json_extract_string(value, '$.type') IS NOT NULL",
-            (bundle_text,),
-        ).fetchall()
-        return [row[0] for row in rows]
+        return [
+            row[0]
+            for row in self.connection.execute(
+                "SELECT DISTINCT json_extract_string(value, '$.type') AS obj_type "
+                "FROM json_each(?::JSON, '$.objects') "
+                "WHERE json_extract_string(value, '$.type') IS NOT NULL",
+                (bundle_text,),
+            ).fetchall()
+        ]
 
     def _object_count(self, bundle_text: str) -> int:
-        return int(self.connection.execute(
-            "SELECT COUNT(*) FROM json_each(?::JSON, '$.objects')",
-            (bundle_text,),
-        ).fetchone()[0])
+        return int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM json_each(?::JSON, '$.objects')",
+                (bundle_text,),
+            ).fetchone()[0]
+        )
 
     def _insert_type_from_json(self, obj_type: str, bundle_text: str, query_id):
         self._create_native_table(obj_type)
@@ -256,32 +238,19 @@ class DuckDBStorage:
             for name in columns:
                 if name == "id":
                     continue
-                if obj_type == "observed-data" and name == "first_observed":
-                    expr = (
-                        'COALESCE(LEAST("observed-data".first_observed, '
-                        'EXCLUDED.first_observed), "observed-data".first_observed, '
-                        'EXCLUDED.first_observed)'
-                    )
-                elif obj_type == "observed-data" and name == "last_observed":
-                    expr = (
-                        'COALESCE(GREATEST("observed-data".last_observed, '
-                        'EXCLUDED.last_observed), "observed-data".last_observed, '
-                        'EXCLUDED.last_observed)'
-                    )
-                elif obj_type == "observed-data" and name == "number_observed":
-                    expr = (
-                        'COALESCE("observed-data".number_observed, 0) + '
-                        'COALESCE(EXCLUDED.number_observed, 0)'
-                    )
-                else:
-                    expr = (
-                        f"COALESCE(EXCLUDED.{_qident(name)}, "
-                        f"{_qident(obj_type)}.{_qident(name)})"
-                    )
+                expr = (
+                    f"COALESCE(EXCLUDED.{_qident(name)}, "
+                    f"{_qident(obj_type)}.{_qident(name)})"
+                )
                 updates.append(f"{_qident(name)} = {expr}")
             stmt += " ON CONFLICT (id) DO UPDATE SET " + ", ".join(updates)
 
-        self.connection.execute(stmt, (bundle_text, obj_type))
+        try:
+            self.connection.execute(stmt, (bundle_text, obj_type))
+        except duckdb.ConversionException as exc:
+            raise InvalidObject(
+                f"{obj_type} contains a value incompatible with the STIX schema: {exc}"
+            ) from exc
 
         if query_id:
             self.connection.execute(
@@ -289,9 +258,22 @@ class DuckDBStorage:
                 "SELECT ?, json_extract_string(value, '$.id') "
                 "FROM json_each(?::JSON, '$.objects') "
                 "WHERE json_extract_string(value, '$.type') = ? "
-                "AND json_extract_string(value, '$.id') IS NOT NULL",
+                "AND json_extract_string(value, '$.id') IS NOT NULL "
+                "ON CONFLICT DO NOTHING",
                 (str(query_id), bundle_text, obj_type),
             )
+
+    def _mark_query_running(self, qid, source, stix_pattern, native_query):
+        self.connection.execute(
+            'INSERT INTO "raw_query" '
+            '(query_id, source, stix_pattern, native_query, started_at, status, result_count) '
+            "VALUES (?, ?, ?, ?, current_timestamp, 'RUNNING', 0) "
+            'ON CONFLICT (query_id) DO UPDATE SET '
+            'source = EXCLUDED.source, stix_pattern = EXCLUDED.stix_pattern, '
+            'native_query = EXCLUDED.native_query, started_at = EXCLUDED.started_at, '
+            "completed_at = NULL, status = 'RUNNING', result_count = 0, error = NULL",
+            (qid, source, stix_pattern, native_query),
+        )
 
     def cache(self, query_id, bundles, batchsize=2000, source=None,
               stix_pattern=None, native_query=None, **_kwargs):
@@ -303,20 +285,11 @@ class DuckDBStorage:
         qid = str(query_id) if query_id is not None else None
         object_count = 0
 
+        if qid:
+            self._mark_query_running(qid, source, stix_pattern, native_query)
+
         self.connection.execute("BEGIN")
         try:
-            if qid:
-                self.connection.execute(
-                    'INSERT INTO "raw_query" '
-                    '(query_id, source, stix_pattern, native_query, started_at, status, result_count) '
-                    "VALUES (?, ?, ?, ?, current_timestamp, 'RUNNING', 0) "
-                    'ON CONFLICT (query_id) DO UPDATE SET '
-                    'source = EXCLUDED.source, stix_pattern = EXCLUDED.stix_pattern, '
-                    'native_query = EXCLUDED.native_query, started_at = EXCLUDED.started_at, '
-                    "completed_at = NULL, status = 'RUNNING', result_count = 0, error = NULL",
-                    (qid, source, stix_pattern, native_query),
-                )
-
             for text in bundle_texts:
                 self._validate_bundle(text)
                 self.connection.execute(
@@ -345,161 +318,10 @@ class DuckDBStorage:
                 )
             raise
 
-    def lookup(self, viewname, cols="*", limit=None, offset=None, col_dict=None):
-        del col_dict
-        validate_name(viewname)
-        if cols == "*":
-            projection = "*"
-        else:
-            if isinstance(cols, str):
-                cols = [item.strip() for item in cols.split(",")]
-            projection = ", ".join(_qident(item) for item in cols)
-        sql = f"SELECT {projection} FROM {_qident(viewname)}"
-        if limit:
-            sql += f" LIMIT {int(limit)}"
-        if offset:
-            sql += f" OFFSET {int(offset)}"
-        rows = self._query(sql).fetchall()
-        if cols == "*" and self._table_exists(viewname):
-            for row in rows:
-                row.setdefault("type", viewname)
-        return rows
-
-    def values(self, path, viewname):
-        _, _, column = path.rpartition(":")
-        rows = self._query(
-            f"SELECT {_qident(column)} FROM {_qident(viewname)}"
-        ).fetchall()
-        return [row[column] for row in rows]
-
-    def count(self, viewname):
-        row = self._query(
-            f"SELECT COUNT(*) AS count FROM {_qident(viewname)}"
-        ).fetchone()
-        return int(row["count"])
-
-    def value_counts(self, viewname, path):
-        _, _, column = path.rpartition(":")
-        sql = (
-            f"SELECT v.{_qident(column)} AS {_qident(path)}, COUNT(*) AS count "
-            f"FROM {_qident(viewname)} v "
-            f'JOIN "observed-data" o ON list_contains(o.object_refs, v.id) '
-            f'GROUP BY v.{_qident(column)}'
-        )
-        return self._query(sql).fetchall()
-
-    def number_observed(self, viewname, path, value=None):
-        _, _, column = path.rpartition(":")
-        sql = (
-            f"SELECT SUM(o.number_observed) AS count FROM {_qident(viewname)} v "
-            f'JOIN "observed-data" o ON list_contains(o.object_refs, v.id)'
-        )
-        params = []
-        if value is not None:
-            sql += f" WHERE v.{_qident(column)} = ?"
-            params.append(value)
-        row = self._query(sql, params).fetchone()
-        return int(row["count"] or 0) if row else self.count(viewname)
-
-    def summary(self, viewname, path=None, value=None):
-        sql = (
-            f"SELECT MIN(o.first_observed) AS first_observed, "
-            f"MAX(o.last_observed) AS last_observed, "
-            f"SUM(o.number_observed) AS number_observed "
-            f"FROM {_qident(viewname)} v "
-            f'JOIN "observed-data" o ON list_contains(o.object_refs, v.id)'
-        )
-        params = []
-        if path and value is not None:
-            _, _, column = path.rpartition(":")
-            sql += f" WHERE v.{_qident(column)} = ?"
-            params.append(value)
-        row = self._query(sql, params).fetchone()
-        if not row or row["number_observed"] is None:
-            return {
-                "first_observed": None,
-                "last_observed": None,
-                "number_observed": self.count(viewname),
-            }
-        row["number_observed"] = int(row["number_observed"])
-        return row
-
-    def timestamped(self, viewname, path=None, value=None,
-                    timestamp="first_observed", limit=None):
-        projection = [f"o.{_qident(timestamp)} AS {_qident(timestamp)}"]
-        if path:
-            paths = path if isinstance(path, (list, tuple)) else [path]
-            for item in paths:
-                _, _, column = item.rpartition(":")
-                projection.append(f"v.{_qident(column)} AS {_qident(item)}")
-        sql = (
-            f"SELECT {', '.join(projection)} FROM {_qident(viewname)} v "
-            f'JOIN "observed-data" o ON list_contains(o.object_refs, v.id)'
-        )
-        params = []
-        if path and value is not None and not isinstance(path, (list, tuple)):
-            _, _, column = path.rpartition(":")
-            sql += f" WHERE v.{_qident(column)} = ?"
-            params.append(value)
-        sql += f" ORDER BY o.{_qident(timestamp)}"
-        if limit:
-            sql += f" LIMIT {int(limit)}"
-        return self._query(sql, params).fetchall()
-
-    def tables(self):
-        rows = self._query(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = ? AND table_type = 'BASE TABLE'",
-            (self.session_id,),
-        ).fetchall()
-        return [row["table_name"] for row in rows if not row["table_name"].startswith("__")]
-
-    def types(self, private=False):
-        del private
-        internal = {"raw_query", "raw_bundle", "raw_run_object"}
-        return [name for name in self.tables() if name not in internal]
-
-    def views(self):
-        rows = self._query(
-            "SELECT view_name FROM duckdb_views() WHERE schema_name = ?",
-            (self.session_id,),
-        ).fetchall()
-        return [row["view_name"] for row in rows]
-
-    def table_type(self, viewname):
-        return viewname if self._table_exists(viewname) else None
-
-    def columns(self, viewname):
-        try:
-            return [row["name"] for row in self._query(
-                f"PRAGMA table_info({_qident(viewname)})"
-            ).fetchall()]
-        except UnknownViewname:
-            return []
-
-    def schema(self, viewname=None):
-        if viewname:
-            return [
-                {"name": row["name"], "type": row["type"]}
-                for row in self._query(
-                    f"PRAGMA table_info({_qident(viewname)})"
-                ).fetchall()
-            ]
-        result = []
-        for table in self.tables():
-            for row in self.schema(table):
-                result.append({"table": table, **row})
-        return result
-
-    def provenance(self, query_id=None):
-        if query_id is None:
-            return self._query('SELECT * FROM "raw_query" ORDER BY started_at').fetchall()
-        return self._query(
-            'SELECT * FROM "raw_query" WHERE query_id = ?', (str(query_id),)
-        ).fetchone()
-
     def delete(self):
-        self.connection.execute(f"DROP SCHEMA IF EXISTS {_qident(self.session_id)} CASCADE")
+        self.connection.execute(
+            f"DROP SCHEMA IF EXISTS {_qident(self.session_id)} CASCADE"
+        )
         self.connection.close()
 
 

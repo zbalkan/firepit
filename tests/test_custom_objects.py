@@ -20,15 +20,20 @@ def test_custom_object_retains_unknown_fields_in_raw(tmpdir):
         }
         store.cache("q1", bundle)
 
-        columns = store.columns("x-oca-event")
+        columns = {
+            row[1]
+            for row in store.connection.execute(
+                'PRAGMA table_info("x-oca-event")'
+            ).fetchall()
+        }
         assert "process_ref" not in columns
         assert "_raw" in columns
 
-        row = store._query(
-            'SELECT json_extract_string(_raw, \'$.process_ref\') AS process_ref '
+        row = store.connection.execute(
+            "SELECT json_extract_string(_raw, '$.process_ref') "
             'FROM "x-oca-event" WHERE id = ?',
             (event_id,),
         ).fetchone()
-        assert row["process_ref"] == process_id
+        assert row[0] == process_id
     finally:
         store.close()

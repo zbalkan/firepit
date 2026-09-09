@@ -38,32 +38,21 @@ def _bundle():
     }
 
 
-def test_observation_record_count_and_number_observed_are_distinct(tmpdir):
+def test_observation_summary_names_record_and_event_semantics_explicitly(tmpdir):
     store = get_storage(str(tmpdir.join("observations.duckdb")), "hunt")
     try:
         store.cache("q1", _bundle())
-        row = store._query(
-            'SELECT COUNT(*) AS observation_records, '
-            'SUM(number_observed) AS observation_count '
-            'FROM "observation_ref" WHERE object_ref = ?',
+        row = store.connection.execute(
+            'SELECT observation_records, observation_count, first_observed, last_observed '
+            'FROM "observation_summary" WHERE object_ref = ?',
             ("ipv4-addr--11111111-1111-4111-8111-111111111111",),
         ).fetchone()
-        assert row["observation_records"] == 2
-        assert row["observation_count"] == 5
-    finally:
-        store.close()
-
-
-def test_summary_uses_native_object_refs(tmpdir):
-    store = get_storage(str(tmpdir.join("observations.duckdb")), "hunt")
-    try:
-        store.cache("q1", _bundle())
-        summary = store.summary("ipv4-addr", "value", "192.0.2.25")
-        assert summary["number_observed"] == 5
-        assert summary["first_observed"].astimezone(timezone.utc) == datetime(
+        assert row[0] == 2
+        assert row[1] == 5
+        assert row[2].astimezone(timezone.utc) == datetime(
             2026, 9, 9, 10, 0, tzinfo=timezone.utc
         )
-        assert summary["last_observed"].astimezone(timezone.utc) == datetime(
+        assert row[3].astimezone(timezone.utc) == datetime(
             2026, 9, 9, 11, 2, tzinfo=timezone.utc
         )
     finally:

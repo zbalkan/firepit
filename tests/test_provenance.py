@@ -24,19 +24,23 @@ def test_provenance_is_independent_from_sco_identity(tmpdir):
         store.cache("q1", _bundle(object_id, "10.0.0.1"), source="source-a")
         store.cache("q2", _bundle(object_id, "10.0.0.1"), source="source-b")
 
-        rows = store._query(
+        rows = store.connection.execute(
             'SELECT query_id, object_id FROM "raw_run_object" '
             'WHERE object_id = ? ORDER BY query_id',
             (object_id,),
         ).fetchall()
-        assert rows == [
-            {"query_id": "q1", "object_id": object_id},
-            {"query_id": "q2", "object_id": object_id},
-        ]
+        assert rows == [("q1", object_id), ("q2", object_id)]
 
-        assert store.count("ipv4-addr") == 1
-        assert store.provenance("q1")["source"] == "source-a"
-        assert store.provenance("q2")["source"] == "source-b"
+        assert store.connection.execute(
+            'SELECT COUNT(*) FROM "ipv4-addr"'
+        ).fetchone()[0] == 1
+        rows = store.connection.execute(
+            'SELECT query_id, source, status FROM "raw_query" ORDER BY query_id'
+        ).fetchall()
+        assert rows == [
+            ("q1", "source-a", "COMPLETED"),
+            ("q2", "source-b", "COMPLETED"),
+        ]
     finally:
         store.close()
 
@@ -48,10 +52,9 @@ def test_raw_bundle_is_retained(tmpdir):
             "q1",
             _bundle("ipv4-addr--22222222-2222-4222-8222-222222222222", "192.0.2.1"),
         )
-        row = store._query(
-            'SELECT json_extract_string(bundle, \'$.type\') AS type '
-            'FROM "raw_bundle"'
+        row = store.connection.execute(
+            "SELECT json_extract_string(bundle, '$.type') FROM \"raw_bundle\""
         ).fetchone()
-        assert row["type"] == "bundle"
+        assert row[0] == "bundle"
     finally:
         store.close()

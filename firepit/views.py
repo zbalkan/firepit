@@ -1,8 +1,4 @@
-"""Explicit DuckDB enrichment views for common STIX relationships."""
-
-
-def _qident(name):
-    return '"' + name.replace('"', '""') + '"'
+"""Explicit DuckDB views for common STIX relationships and observation analytics."""
 
 
 def _table_exists(connection, session_id, table):
@@ -14,7 +10,7 @@ def _table_exists(connection, session_id, table):
 
 
 def install_views(connection, session_id):
-    """Create or refresh the small set of intentional enriched views."""
+    """Create or refresh the small set of intentional analytical views."""
     if _table_exists(connection, session_id, "observed-data"):
         connection.execute(
             'CREATE OR REPLACE VIEW "observation_ref" AS '
@@ -22,6 +18,17 @@ def install_views(connection, session_id):
             'o.first_observed, o.last_observed, o.number_observed '
             'FROM "observed-data" o '
             'CROSS JOIN UNNEST(o.object_refs) AS ref(object_ref)'
+        )
+        connection.execute(
+            'CREATE OR REPLACE VIEW "observation_summary" AS '
+            'SELECT ref.object_ref, '
+            'COUNT(*) AS observation_records, '
+            'SUM(o.number_observed) AS observation_count, '
+            'MIN(o.first_observed) AS first_observed, '
+            'MAX(o.last_observed) AS last_observed '
+            'FROM "observed-data" o '
+            'CROSS JOIN UNNEST(o.object_refs) AS ref(object_ref) '
+            'GROUP BY ref.object_ref'
         )
 
     if _table_exists(connection, session_id, "process"):
