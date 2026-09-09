@@ -1,6 +1,6 @@
 # Usage
 
-Firepit is becoming a thin STIX-to-DuckDB storage component. New integrations should keep acquisition outside Firepit and use DuckDB directly for analysis.
+Firepit is a thin STIX 2.1-to-DuckDB storage component. Acquisition stays outside Firepit and analysis uses DuckDB directly.
 
 ## Storage
 
@@ -11,7 +11,7 @@ store = get_storage("observations.duckdb", "hunt")
 store.cache("query-1", "bundle.json")
 ```
 
-The modernization branch still contains compatibility methods that will be removed. Do not build new code around mutable Firepit hunt variables, appdata, database-independent query objects, or automatic graph dereferencing.
+The storage boundary accepts STIX 2.1 bundles. Remote credentials, connector execution, polling, paging, retries, and vendor-native translation belong in the acquisition layer.
 
 ## Recommended analytical workflow
 
@@ -31,27 +31,25 @@ Known nested fields are native DuckDB `STRUCT`, `LIST`, or `MAP` values, which k
 
 ## Acquisition boundary
 
-Remote access should look like:
-
 ```text
 STIX pattern
     |
     v
 Python + STIX-Shifter
     |
-    | STIX 2.1 JSON
+    | raw STIX 2.1 JSON
     v
 Firepit / DuckDB
 ```
 
-Firepit should not own credentials, remote HTTP, connector polling, pagination, or vendor-native result translation.
+Firepit does not own credentials, remote HTTP, connector polling, pagination, or vendor-native result translation.
 
-## DuckDB UI
+## Interactive analysis
 
-A Firepit database is an ordinary DuckDB database. For interactive analysis:
+A Firepit database is an ordinary DuckDB database. Use DuckDB directly:
 
 ```bash
 duckdb observations.duckdb -ui
 ```
 
-The long-term interactive surface is DuckDB SQL/UI rather than a parallel Firepit shell.
+There is no parallel Firepit shell. DuckDB SQL/UI is the interactive query surface.
