@@ -1,30 +1,15 @@
 # Installation
 
-Firepit supports CPython 3.11, 3.12, 3.13, and 3.14.
+Firepit 3 supports CPython 3.11, 3.12, 3.13, and 3.14.
 
-## Editable development install
-
-```bash
-python -m pip install -e .
-```
-
-Install test dependencies with:
+## Development install
 
 ```bash
 python -m pip install -e ".[test]"
-```
-
-Run tests:
-
-```bash
 python -m pytest
 ```
 
-Run the configured Python-version matrix:
-
-```bash
-tox
-```
+The GitHub Actions matrix runs the supported Python versions on Linux, macOS, and Windows.
 
 ## Build a distribution
 
@@ -33,8 +18,18 @@ python -m pip install build
 python -m build
 ```
 
-The package metadata and dependencies are defined only in `pyproject.toml`. There is no `setup.py`, `setup.cfg`, or requirements file compatibility layer.
+All package metadata and dependencies live in `pyproject.toml`. The repository no longer carries `setup.py`, `setup.cfg`, requirements files, `tox.ini`, a project Makefile, or Pylint-specific configuration.
 
-## Runtime dependency policy
+## Dependencies
 
-DuckDB is the permanent storage dependency. Other dependencies are transitional and should disappear as the corresponding compatibility layers are removed. See the dependency burn-down in [MODERNIZATION_ROADMAP.md](../MODERNIZATION_ROADMAP.md).
+The core runtime dependency set is intentionally one package:
+
+```text
+duckdb
+```
+
+Testing adds `pytest` and `pytest-cov`. Release tooling is optional.
+
+## Database compatibility
+
+Firepit 3 does not reinterpret older Firepit databases. A session without the current native-model metadata, or with another native model version, is rejected. Re-ingest source STIX 2.1 into a new database/session.

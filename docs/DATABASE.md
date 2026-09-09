@@ -1,6 +1,6 @@
 # Database model
 
-Firepit's target database model follows STIX semantics while using DuckDB-native types.
+Firepit stores STIX 2.1 using DuckDB-native types and retains raw provenance.
 
 ## Modeling rules
 
@@ -10,15 +10,18 @@ Known nested object      -> STRUCT
 Known repeated scalar    -> LIST<T>
 Known repeated object    -> LIST<STRUCT<...>>
 Homogeneous dictionary   -> MAP
-Unknown/custom content   -> JSON fallback
-Raw source preservation  -> JSON provenance
+Known heterogeneous field-> JSON
+Unknown/custom content   -> _raw JSON
+Original bundle          -> raw_bundle JSON
 ```
 
-JSON is an exception, not the default analytical representation.
+JSON is the exception for analytical data, not the default representation.
 
-## Example
+## Typed STIX tables
 
-A process can expose standard nested fields without flattening them into dotted SQL column names:
+Each encountered STIX object type receives one typed table. Known schema comes from `firepit/stixschema.py`; ingestion does not infer types or execute `ALTER TABLE ADD COLUMN` for new custom fields.
+
+Example:
 
 ```sql
 SELECT
@@ -30,27 +33,56 @@ SELECT
 FROM process;
 ```
 
-`opened_connection_refs` and other repeated STIX references remain native lists instead of being decomposed into a mandatory physical relationship table.
-
-## Schema evolution
-
-A new or custom STIX field does not immediately change a table with `ALTER TABLE`. Unknown content remains available in the raw object. A field should be promoted into the native schema only when its STIX shape is known and its analytical value justifies a first-class typed representation.
-
-## Reference handling
-
-Scalar references such as `parent_ref`, `src_ref`, and `dst_ref` remain IDs. List references such as `object_refs`, `contains_refs`, and `opened_connection_refs` remain lists.
-
-Relational expansion is derived when required:
+Unknown or future properties remain in `_raw`:
 
 ```sql
-SELECT id, unnest(object_refs) AS object_ref
-FROM "observed-data";
+SELECT json_extract(_raw, '$.x_vendor_context')
+FROM process;
 ```
 
-Common enriched relationships should be exposed through explicit, inspectable views instead of implicit `SELECT *` auto-dereferencing.
+## Strict projection
+
+DuckDB performs JSON iteration, extraction, and casting. Known nested and scalar values are cast to the declared type. A conversion failure aborts the ingestion transaction and records the acquisition run as failed.
+
+## References
+
+Scalar references such as `parent_ref`, `src_ref`, and `dst_ref` remain IDs. Repeated references such as `object_refs`, `contains_refs`, and `opened_connection_refs` remain `VARCHAR[]`.
+
+`observation_ref` expands only observation membership:
+
+```sql
+SELECT observed_data_id, object_ref, number_observed
+FROM observation_ref;
+```
+
+`observation_summary` makes the two observation quantities explicit:
+
+```sql
+SELECT
+    object_ref,
+    observation_records,
+    observation_count,
+    first_observed,
+    last_observed
+FROM observation_summary;
+```
+
+Common process and network enrichment is exposed through explicit `stixv_process` and `stixv_network_traffic` views rather than recursive auto-dereference.
 
 ## Provenance
 
-Stable SCO identity and acquisition provenance are separate concerns. The target model records acquisition runs/bundles independently from SCO rows so the same SCO can participate in multiple runs without overwriting provenance.
+Provenance is independent of stable SCO identity:
 
-See [MODERNIZATION_ROADMAP.md](../MODERNIZATION_ROADMAP.md) for the staged transition from the legacy metadata and compatibility tables.
+- `raw_query` stores acquisition-run metadata and status;
+- `raw_bundle` stores successful original STIX bundles;
+- `raw_run_object` associates a run with object IDs.
+
+The same SCO can therefore appear in multiple acquisition runs without duplicating its typed row or losing run provenance.
+
+## Idempotence
+
+Object IDs are the typed-table conflict key. Re-ingesting the same object ID does not add `number_observed` again. Multiple distinct `observed-data` objects that reference the same SCO remain distinct and are aggregated only in analytical views.
+
+## Schema version
+
+Firepit 3 uses native model version 6. Older/pre-native database sessions are rejected explicitly; there is no implicit conversion from the legacy SQLite/PostgreSQL-era model.

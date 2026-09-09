@@ -1,6 +1,6 @@
 # Contributing
 
-Firepit is in the middle of a deliberate architectural reduction. Contributions should simplify the DuckDB-native STIX 2.1 path rather than preserve compatibility layers that are scheduled for removal.
+Firepit 3 has completed the DuckDB-native reduction. Contributions should preserve the narrow storage boundary rather than rebuild historical compatibility layers.
 
 ## Development setup
 
@@ -11,41 +11,38 @@ python -m pip install -e ".[test]"
 python -m pytest
 ```
 
-Run the full configured Python matrix with:
-
-```bash
-tox
-```
+CI runs the supported Python range on Linux, macOS, and Windows.
 
 ## Design rules
 
-Changes should follow these constraints:
-
 - DuckDB is the only storage backend.
-- STIX 2.1 is the target internal model.
-- Prefer DuckDB scalar, `STRUCT`, `LIST`, and `MAP` types over JSON when the schema is known.
-- JSON is a fallback for raw provenance, custom fields, or genuinely heterogeneous values.
-- Do not introduce Pandas or dataframe processing into the core storage path.
-- Do not add a new database-independent query abstraction.
-- Do not reintroduce Kestrel-specific variable/state semantics.
-- Acquisition, credentials, remote polling, pagination, and STIX-Shifter orchestration belong above Firepit.
-- Analytical behavior should be expressed in DuckDB SQL or explicit views/macros.
+- STIX 2.1 is the only supported storage model.
+- Prefer scalar, `STRUCT`, `LIST`, and `MAP` types when STIX defines the shape.
+- Use JSON only for raw provenance, unknown/custom content, or genuinely heterogeneous fields.
+- Known-field type errors must fail ingestion rather than silently become `NULL`.
+- Do not add Pandas/dataframe processing to core storage.
+- Do not add HTTP acquisition, credentials, connector polling, or STIX-Shifter execution to Firepit.
+- Do not reintroduce a database-independent query AST or local STIX-pattern compiler.
+- Do not reintroduce Kestrel variable/appdata semantics.
+- Do not auto-dereference arbitrary references.
+- Prefer direct DuckDB SQL and small explicit views for analytical behavior.
 
 ## Tests
 
-A change that removes a compatibility layer should add or retain tests for the replacement semantics, not for the implementation being deleted.
+New behavior should be covered at the semantic boundary. Important cases include:
 
-Important coverage areas include:
-
-- nested standard STIX extensions;
-- list references;
-- mixed IPv4/IPv6 references;
-- repeated SCO identity across acquisition runs;
-- `number_observed > 1` semantics;
-- custom property preservation;
-- persistence after reopening a DuckDB file;
-- Python 3.11-3.14.
+- native nested STIX types;
+- malformed known fields;
+- custom/unknown property retention;
+- list references and explicit enrichment views;
+- repeated SCO identity across runs;
+- multiple `observed-data` records;
+- `observation_records` versus `observation_count`;
+- idempotent re-ingestion of the same STIX object ID;
+- persistence/reopen behavior;
+- explicit rejection of STIX 2.0 and pre-native databases;
+- representative STIX-Shifter 2.1 bundle shapes.
 
 ## Commit structure
 
-Keep architectural deletions independently reviewable. Prefer one commit per modernization phase or roadmap item. Large items may be split into a small number of coherent commits when required for correctness.
+Keep unrelated changes independently reviewable. Architectural changes should explain which semantic boundary they alter and why the change belongs in Firepit rather than acquisition or analysis.

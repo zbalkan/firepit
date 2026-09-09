@@ -1,21 +1,32 @@
 # History
 
-## 2.3.35 modernization branch
+## 3.0.0
 
-The `claude/firepit-duckdb-modernize-9tj618` branch starts a breaking modernization of Firepit rather than extending the historical multi-backend design.
+Firepit 3 is a breaking architectural reduction centered on DuckDB and STIX 2.1.
 
-Major changes underway:
+Major changes:
 
-- DuckDB replaces SQLite and PostgreSQL as the sole storage engine.
-- SQL dialect branching is being removed.
-- CPython 3.11-3.14 is the supported range.
-- Packaging uses `pyproject.toml`.
-- A native STIX 2.1 schema maps known data to DuckDB scalar, `LIST`, `MAP`, and `STRUCT` types.
-- Unknown and custom fields remain available through raw JSON provenance instead of triggering dynamic `ALTER TABLE` growth.
-- Kestrel-era state, generic query abstraction, async/dataframe ingestion, STIX 2.0 compatibility, and utility CLIs are scheduled for staged removal.
+- DuckDB is the sole database backend.
+- CPython 3.11-3.14 is supported.
+- Packaging is defined in `pyproject.toml`.
+- STIX 2.0 embedded-object compatibility was removed.
+- Raw STIX 2.1 JSON is parsed and projected by DuckDB.
+- Known STIX fields use scalar, `LIST`, `MAP`, and `STRUCT` types.
+- Unknown/custom content is preserved in `_raw` and immutable raw-bundle provenance.
+- Dynamic schema inference/`ALTER TABLE` ingestion was removed.
+- SQLite/PostgreSQL dialect abstractions were removed.
+- Kestrel-era `__symtable`, appdata, mutable hunt variables, and `__queries` semantics were removed.
+- Provenance now uses `raw_query`, `raw_bundle`, and `raw_run_object`.
+- `__contains`, `__reflist`, and recursive auto-dereference were removed.
+- The generic query AST, heuristic aggregation, and local STIX-pattern compiler were removed.
+- AIO/Pandas ingestion, HTTP acquisition, `splint`, `woodchipper`, and the Firepit CLI were removed.
+- Observation record count and `number_observed` sum are exposed explicitly through `observation_summary`.
+- Known-field type mismatches fail ingestion instead of silently becoming null.
+- Pre-native/older native databases are rejected explicitly.
+- Runtime dependencies were reduced to `duckdb`.
 
-The detailed sequence and acceptance criteria are tracked in [MODERNIZATION_ROADMAP.md](MODERNIZATION_ROADMAP.md).
+The implementation history is recorded in [MODERNIZATION_ROADMAP.md](MODERNIZATION_ROADMAP.md).
 
-## Earlier releases
+## 2.x and earlier
 
-Earlier releases provided relationalized STIX storage over SQLite and PostgreSQL and were primarily designed around the Kestrel 1 storage contract. Refer to Git history and published releases for the exact historical changelog.
+Earlier releases relationalized STIX over SQLite and PostgreSQL and primarily served the Kestrel 1 storage contract. Refer to Git history and published releases for detailed historical changes.

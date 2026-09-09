@@ -1,55 +1,89 @@
 # Usage
 
-Firepit is a thin STIX 2.1-to-DuckDB storage component. Acquisition stays outside Firepit and analysis uses DuckDB directly.
+Firepit is a thin STIX 2.1 ingestion and storage component. Acquisition stays above Firepit; analysis uses DuckDB directly.
 
-## Storage
+## Open a session
 
 ```python
 from firepit import get_storage
 
 store = get_storage("observations.duckdb", "hunt")
-store.cache("query-1", "bundle.json")
 ```
 
-The storage boundary accepts STIX 2.1 bundles. Remote credentials, connector execution, polling, paging, retries, and vendor-native translation belong in the acquisition layer.
+A session is a DuckDB schema inside the database file.
 
-## Recommended analytical workflow
+## Ingest STIX 2.1
 
-Use DuckDB SQL against typed STIX tables and explicit enriched views.
+```python
+store.cache(
+    "query-1",
+    bundle_json,
+    source="source-name",
+    stix_pattern="[process:pid = 1234]",
+    native_query="vendor native query",
+)
+```
+
+`bundle_json` may be a Python dictionary, raw JSON text, a file-like object, or a local file path. Firepit performs no HTTP acquisition.
+
+Ingestion is transactional. Known STIX fields are cast to the types declared by `stixschema.py`; incompatible known values fail the run. `raw_query` records `COMPLETED` or `FAILED` state, and successful raw bundles are retained in `raw_bundle`.
+
+## Query with DuckDB
+
+Use the underlying DuckDB connection directly:
+
+```python
+rows = store.connection.execute("""
+    SELECT
+        id,
+        pid,
+        command_line,
+        extensions."windows-process-ext".owner_sid
+    FROM process
+    WHERE pid IS NOT NULL
+""").fetchall()
+```
+
+There is no Firepit `lookup()`, `filter()`, `extract()`, query AST, or local STIX-pattern compiler in version 3.
+
+## Observation semantics
+
+STIX observation records and represented event counts are different quantities. Firepit exposes them explicitly:
 
 ```sql
 SELECT
-    id,
-    pid,
-    command_line,
-    extensions."windows-process-ext".owner_sid
-FROM process
-WHERE command_line IS NOT NULL;
+    object_ref,
+    observation_records,
+    observation_count,
+    first_observed,
+    last_observed
+FROM observation_summary;
 ```
 
-Known nested fields are native DuckDB `STRUCT`, `LIST`, or `MAP` values, which keeps their schema visible to DuckDB tooling and autocomplete.
+`observation_records` counts linked `observed-data` objects. `observation_count` sums their `number_observed` values.
 
-## Acquisition boundary
+## Reference enrichment
 
-```text
-STIX pattern
-    |
-    v
-Python + STIX-Shifter
-    |
-    | raw STIX 2.1 JSON
-    v
-Firepit / DuckDB
+References remain IDs or native lists in base tables. Firepit does not auto-dereference `SELECT *`.
+
+Use explicit views when useful:
+
+```sql
+SELECT pid, parent_pid, user_name, image_name
+FROM stixv_process;
+
+SELECT src_ipv4, src_ipv6, dst_ipv4, dst_ipv6
+FROM stixv_network_traffic;
 ```
 
-Firepit does not own credentials, remote HTTP, connector polling, pagination, or vendor-native result translation.
+## Close
 
-## Interactive analysis
+```python
+store.close()
+```
 
-A Firepit database is an ordinary DuckDB database. Use DuckDB directly:
+For interactive exploration, open the same database in DuckDB UI:
 
 ```bash
 duckdb observations.duckdb -ui
 ```
-
-There is no parallel Firepit shell. DuckDB SQL/UI is the interactive query surface.
