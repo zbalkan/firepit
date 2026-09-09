@@ -1,4 +1,4 @@
-from firepit.duckdbnative import get_native_storage
+from firepit import get_storage
 from firepit.stixschema import column_type
 from firepit.stixschema import schema_for
 
@@ -72,7 +72,7 @@ def _extension_bundle():
                         'request_method': 'get',
                         'request_value': '/',
                         # Real producers frequently emit a scalar for a
-                        # non-repeated header.  Projection normalizes that to
+                        # non-repeated header. Projection normalizes that to
                         # the STIX 2.1 list-of-string value type.
                         'request_header': {
                             'User-Agent': 'test-agent',
@@ -88,7 +88,7 @@ def _extension_bundle():
 
 
 def test_native_storage_exposes_standard_extensions_as_struct(tmpdir):
-    store = get_native_storage(str(tmpdir.join('extensions.db')), 'hunt')
+    store = get_storage(str(tmpdir.join('extensions.db')), 'hunt')
     try:
         store.cache('q1', _extension_bundle())
         row = store._query(
@@ -111,7 +111,7 @@ def test_native_storage_exposes_standard_extensions_as_struct(tmpdir):
 
 
 def test_unknown_extension_members_survive_in_raw_json(tmpdir):
-    store = get_native_storage(str(tmpdir.join('extensions.db')), 'hunt')
+    store = get_storage(str(tmpdir.join('extensions.db')), 'hunt')
     try:
         store.cache('q1', _extension_bundle())
         row = store._query(
