@@ -1,18 +1,15 @@
-.PHONY: clean clean-test clean-pyc clean-build docs help
+.PHONY: clean clean-test clean-pyc clean-build help setup lint test test-all test-cov coverage release dist install
 .DEFAULT_GOAL := help
 
 define BROWSER_PYSCRIPT
 import os, webbrowser, sys
-
 from urllib.request import pathname2url
-
 webbrowser.open("file://" + pathname2url(os.path.abspath(sys.argv[1])))
 endef
 export BROWSER_PYSCRIPT
 
 define PRINT_HELP_PYSCRIPT
 import re, sys
-
 for line in sys.stdin:
 	match = re.match(r'^([a-zA-Z_-]+):.*?## (.*)$$', line)
 	if match:
@@ -26,14 +23,14 @@ BROWSER := python -c "$$BROWSER_PYSCRIPT"
 help:
 	@python -c "$$PRINT_HELP_PYSCRIPT" < $(MAKEFILE_LIST)
 
-clean: clean-build clean-pyc clean-test ## remove all build, test, coverage and Python artifacts
+clean: clean-build clean-pyc clean-test ## remove build, test, coverage and Python artifacts
 
 clean-build: ## remove build artifacts
 	rm -fr build/
 	rm -fr dist/
 	find . -name '*.egg-info' -exec rm -fr {} +
 
-clean-pyc: ## remove Python file artifacts
+clean-pyc: ## remove Python bytecode artifacts
 	find . -name '*.pyc' -exec rm -f {} +
 	find . -name '*.pyo' -exec rm -f {} +
 	find . -name '*~' -exec rm -f {} +
@@ -45,66 +42,34 @@ clean-test: ## remove test and coverage artifacts
 	rm -fr htmlcov/
 	rm -fr .pytest_cache
 
-.git/hooks/pre-commit:
-	test -d .git/hooks && echo -e '#!/bin/bash\n\nset -e\n\nmake lint\nmake test' > .git/hooks/pre-commit || true
+setup: ## install editable development, test, lint and release dependencies
+	python -m pip install -e ".[test,lint,release]"
 
-hooks: .git/hooks/pre-commit
-
-setup: hooks ## install an editable development environment
-	python -m pip install -e ".[test,lint,docs,release]"
-
-.PHONY: check-safety
-check-safety:
-	safety check --full-report
+lint: ## run static checks
+	pylint --rcfile .pylintrc -f parseable firepit
 	bandit -ll -ii -r firepit
 
-.PHONY: check-style
-check-style:
-	pylint --rcfile .pylintrc -f parseable firepit
-
-lint: check-safety check-style
-
-
-test: ## run tests quickly with the default Python
-	pytest
+test: ## run tests with the default Python
+	python -m pytest
 
 test-all: ## run tests on every supported Python version with tox
 	tox
 
-test-cov: ## run tests with code coverage assessment
-	pytest --cov=firepit --cov-report=xml
+test-cov: ## run tests with coverage assessment
+	python -m pytest --cov=firepit --cov-report=xml
 
-coverage: ## check code coverage quickly with the default Python
+coverage: ## generate a local HTML coverage report
 	coverage run --source firepit -m pytest
 	coverage report -m
 	coverage html
 	$(BROWSER) htmlcov/index.html
 
-
-DOC_EXCLUDES := \
- firepit/raft.py \
- firepit/cli.py \
- firepit/splint.py \
- firepit/splitter.py \
-
-
-docs: ## generate Sphinx HTML documentation, including API docs
-	rm -f docs/firepit.rst
-	rm -f docs/modules.rst
-	sphinx-apidoc -o docs/ firepit/ $(DOC_EXCLUDES)
-	$(MAKE) -C docs clean
-	$(MAKE) -C docs html
-	$(BROWSER) docs/_build/html/index.html
-
-servedocs: docs ## compile the docs watching for changes
-	watchmedo shell-command -p '*.rst' -c '$(MAKE) -C docs html' -R -D .
-
-release: dist ## package and upload a release
+release: dist ## upload built packages
 	python -m twine upload dist/*
 
 dist: clean ## build source and wheel packages through PEP 517
 	python -m build
 	ls -l dist
 
-install: clean ## install the package to the active Python environment
+install: clean ## install the package into the active Python environment
 	python -m pip install .

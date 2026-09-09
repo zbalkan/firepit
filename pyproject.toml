@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "firepit"
 version = "2.3.35"
 description = "DuckDB-backed storage and query utilities for STIX data."
-readme = { file = "README.rst", content-type = "text/x-rst" }
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11,<3.15"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -38,8 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The experimental async compatibility layer imports pandas at module import
-# time. Keep it out of the core install while that layer is being retired.
+# Temporary: the legacy AIO compatibility path still imports pandas.
 aio = [
     "pandas",
 ]
@@ -57,10 +56,6 @@ lint = [
     "pylint",
     "safety",
 ]
-docs = [
-    "Sphinx",
-    "watchdog",
-]
 release = [
     "build",
     "twine",
@@ -71,10 +66,9 @@ firepit = "firepit.cli:app"
 splint = "firepit.splint:app"
 
 [project.urls]
-Homepage = "https://github.com/opencybersecurityalliance/firepit"
-Documentation = "https://firepit.readthedocs.io"
-Repository = "https://github.com/opencybersecurityalliance/firepit"
-Issues = "https://github.com/opencybersecurityalliance/firepit/issues"
+Homepage = "https://github.com/zbalkan/firepit"
+Repository = "https://github.com/zbalkan/firepit"
+Issues = "https://github.com/zbalkan/firepit/issues"
 
 [tool.setuptools]
 include-package-data = true
