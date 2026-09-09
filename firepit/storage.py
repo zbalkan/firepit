@@ -9,18 +9,25 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
+from uuid import UUID
 
 import duckdb
 
 from firepit.exceptions import InvalidObject
-from firepit.stixschema import rendered_schema
+from firepit.stixschema import SCO_TYPES, rendered_schema
 from firepit.validate import validate_name
 from firepit.views import install_views
 
 _NATIVE_META = "duckdb_native_model"
 _NATIVE_VERSION = "6"
 _NESTED_PREFIXES = ("MAP(", "STRUCT(")
+_INTEGER_TYPES = {
+    "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT",
+    "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT",
+}
+_STIX_TYPE_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", re.ASCII)
 
 
 def _qident(name: str) -> str:
@@ -47,6 +54,25 @@ def _json_projection(source: str, name: str, dtype: str) -> str:
     return f"CAST(json_extract_string({source}, '{path}') AS {dtype})"
 
 
+def _expected_json_types(dtype: str):
+    """Return acceptable DuckDB JSON type labels for a top-level STIX field."""
+    if dtype == "JSON":
+        return None
+    if dtype in {"VARCHAR", "TIMESTAMPTZ"}:
+        return {"VARCHAR", "NULL"}
+    if dtype == "BOOLEAN":
+        return {"BOOLEAN", "NULL"}
+    if dtype in _INTEGER_TYPES:
+        return {"BIGINT", "UBIGINT", "NULL"}
+    if dtype in {"DOUBLE", "FLOAT", "REAL"} or dtype.startswith("DECIMAL("):
+        return {"DOUBLE", "BIGINT", "UBIGINT", "NULL"}
+    if dtype.endswith("[]"):
+        return {"ARRAY", "NULL"}
+    if dtype.startswith(_NESTED_PREFIXES):
+        return {"OBJECT", "NULL"}
+    return None
+
+
 def _bundle_text(bundle) -> str:
     if isinstance(bundle, dict):
         return json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
@@ -62,6 +88,29 @@ def _bundle_text(bundle) -> str:
         with open(value, "r", encoding="utf-8") as fp:
             return fp.read()
     raise TypeError("bundle must be a dict, JSON string, file-like object, or path")
+
+
+def _validate_stix_type(obj_type: str) -> None:
+    if (
+        not isinstance(obj_type, str)
+        or not 3 <= len(obj_type) <= 250
+        or _STIX_TYPE_RE.fullmatch(obj_type) is None
+    ):
+        raise InvalidObject(f"invalid STIX object type: {obj_type!r}")
+
+
+def _validate_identifier(obj_type: str, object_id: str) -> None:
+    if not isinstance(object_id, str):
+        raise InvalidObject(f"{obj_type} must provide a string id")
+    prefix, sep, uuid_text = object_id.partition("--")
+    if sep != "--" or prefix != obj_type:
+        raise InvalidObject(
+            f"STIX id {object_id!r} does not match object type {obj_type!r}"
+        )
+    try:
+        UUID(uuid_text)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise InvalidObject(f"invalid STIX identifier: {object_id!r}") from exc
 
 
 class DuckDBStorage:
@@ -149,7 +198,7 @@ class DuckDBStorage:
         ).fetchone() is not None
 
     def _create_native_table(self, obj_type):
-        validate_name(obj_type)
+        _validate_stix_type(obj_type)
         if self._table_exists(obj_type):
             return
         schema = rendered_schema(obj_type)
@@ -164,46 +213,79 @@ class DuckDBStorage:
 
     def _validate_bundle(self, bundle_text: str):
         try:
-            bundle_type = self.connection.execute(
-                "SELECT json_extract_string(?::JSON, '$.type')", (bundle_text,)
-            ).fetchone()[0]
+            bundle_row = self.connection.execute(
+                "SELECT json_extract_string(j, '$.type'), "
+                "json_extract_string(j, '$.id'), "
+                "json_exists(j, '$.objects'), json_type(j, '$.objects') "
+                "FROM (SELECT ?::JSON AS j)",
+                (bundle_text,),
+            ).fetchone()
         except duckdb.Error as exc:
             raise InvalidObject(f"invalid STIX JSON: {exc}") from exc
+
+        bundle_type, bundle_id, has_objects, objects_type = bundle_row
         if bundle_type != "bundle":
             raise InvalidObject("expected a STIX bundle")
+        if bundle_id is not None:
+            _validate_identifier("bundle", bundle_id)
+        if has_objects and objects_type != "ARRAY":
+            raise InvalidObject("bundle.objects must be a list of STIX objects")
 
-        row = self.connection.execute(
-            "SELECT "
-            "COUNT(*) FILTER (WHERE json_extract_string(value, '$.id') IS NULL) AS missing_id, "
-            "COUNT(*) FILTER (WHERE json_extract_string(value, '$.spec_version') "
-            "IS NOT NULL AND json_extract_string(value, '$.spec_version') <> '2.1') AS old_version, "
-            "COUNT(*) FILTER (WHERE json_extract_string(value, '$.type') = 'observed-data' "
-            "AND json_extract(value, '$.objects') IS NOT NULL) AS embedded, "
-            "COUNT(*) FILTER (WHERE json_extract_string(value, '$.type') = 'observed-data' "
-            "AND json_extract(value, '$.objects') IS NULL "
-            "AND json_extract(value, '$.object_refs') IS NULL) AS missing_refs "
+        rows = self.connection.execute(
+            "SELECT json_extract_string(value, '$.type'), "
+            "json_extract_string(value, '$.id'), "
+            "json_extract_string(value, '$.spec_version'), "
+            "json_exists(value, '$.objects'), "
+            "json_exists(value, '$.object_refs'), "
+            "json_type(value, '$.object_refs'), "
+            "json_array_length(value, '$.object_refs') "
             "FROM json_each(?::JSON, '$.objects')",
             (bundle_text,),
-        ).fetchone()
-        if row[0]:
-            raise InvalidObject("every STIX object must provide id")
-        if row[1]:
-            raise InvalidObject("Firepit accepts STIX 2.1 only")
-        if row[2]:
-            raise InvalidObject(
-                "embedded observed-data.objects is not supported; "
-                "provide STIX 2.1 observed-data.object_refs"
-            )
-        if row[3]:
-            raise InvalidObject("observed-data must provide object_refs")
+        ).fetchall()
+
+        for (
+            obj_type,
+            object_id,
+            spec_version,
+            has_embedded,
+            has_object_refs,
+            object_refs_type,
+            object_refs_count,
+        ) in rows:
+            if obj_type is None:
+                raise InvalidObject("every STIX object must provide type")
+            _validate_stix_type(obj_type)
+            if object_id is None:
+                raise InvalidObject("every STIX object must provide id")
+            _validate_identifier(obj_type, object_id)
+
+            if obj_type in SCO_TYPES:
+                if spec_version not in (None, "2.1"):
+                    raise InvalidObject("Firepit accepts STIX 2.1 only")
+            elif spec_version != "2.1":
+                raise InvalidObject(
+                    f"{obj_type} must explicitly declare spec_version 2.1"
+                )
+
+            if obj_type == "observed-data":
+                if has_embedded:
+                    raise InvalidObject(
+                        "embedded observed-data.objects is not supported; "
+                        "provide STIX 2.1 observed-data.object_refs"
+                    )
+                if not has_object_refs:
+                    raise InvalidObject("observed-data must provide object_refs")
+                if object_refs_type != "ARRAY" or not object_refs_count:
+                    raise InvalidObject(
+                        "observed-data.object_refs must be a non-empty list"
+                    )
 
     def _object_types(self, bundle_text: str):
         return [
             row[0]
             for row in self.connection.execute(
                 "SELECT DISTINCT json_extract_string(value, '$.type') AS obj_type "
-                "FROM json_each(?::JSON, '$.objects') "
-                "WHERE json_extract_string(value, '$.type') IS NOT NULL",
+                "FROM json_each(?::JSON, '$.objects')",
                 (bundle_text,),
             ).fetchall()
         ]
@@ -216,9 +298,37 @@ class DuckDBStorage:
             ).fetchone()[0]
         )
 
+    def _validate_known_shapes(self, obj_type: str, bundle_text: str, schema):
+        fields = []
+        for name, dtype in schema.items():
+            if name == "id":
+                continue
+            expected = _expected_json_types(dtype)
+            if expected is not None:
+                fields.append((name, expected))
+        if not fields:
+            return
+
+        select = ", ".join(
+            f"json_type(value, '{_json_path(name)}')" for name, _ in fields
+        )
+        rows = self.connection.execute(
+            f"SELECT {select} FROM json_each(?::JSON, '$.objects') "
+            "WHERE json_extract_string(value, '$.type') = ?",
+            (bundle_text, obj_type),
+        ).fetchall()
+        for row in rows:
+            for (name, expected), actual in zip(fields, row):
+                if actual is not None and actual not in expected:
+                    allowed = ", ".join(sorted(expected - {"NULL"}))
+                    raise InvalidObject(
+                        f"{obj_type}.{name} has JSON type {actual}; expected {allowed}"
+                    )
+
     def _insert_type_from_json(self, obj_type: str, bundle_text: str, query_id):
-        self._create_native_table(obj_type)
         schema = rendered_schema(obj_type)
+        self._validate_known_shapes(obj_type, bundle_text, schema)
+        self._create_native_table(obj_type)
         columns = list(schema) + ["_raw"]
         col_sql = ", ".join(_qident(name) for name in columns)
         projections = [
@@ -244,6 +354,20 @@ class DuckDBStorage:
                 )
                 updates.append(f"{_qident(name)} = {expr}")
             stmt += " ON CONFLICT (id) DO UPDATE SET " + ", ".join(updates)
+            if obj_type not in SCO_TYPES:
+                incoming_modified = (
+                    "TRY_CAST(json_extract_string(EXCLUDED._raw, '$.modified') "
+                    "AS TIMESTAMPTZ)"
+                )
+                existing_modified = (
+                    f"TRY_CAST(json_extract_string({_qident(obj_type)}._raw, "
+                    "'$.modified') AS TIMESTAMPTZ)"
+                )
+                stmt += (
+                    f" WHERE {incoming_modified} IS NULL "
+                    f"OR {existing_modified} IS NULL "
+                    f"OR {incoming_modified} >= {existing_modified}"
+                )
 
         try:
             self.connection.execute(stmt, (bundle_text, obj_type))
@@ -258,22 +382,22 @@ class DuckDBStorage:
                 "SELECT ?, json_extract_string(value, '$.id') "
                 "FROM json_each(?::JSON, '$.objects') "
                 "WHERE json_extract_string(value, '$.type') = ? "
-                "AND json_extract_string(value, '$.id') IS NOT NULL "
                 "ON CONFLICT DO NOTHING",
                 (str(query_id), bundle_text, obj_type),
             )
 
     def _mark_query_running(self, qid, source, stix_pattern, native_query):
-        self.connection.execute(
-            'INSERT INTO "raw_query" '
-            '(query_id, source, stix_pattern, native_query, started_at, status, result_count) '
-            "VALUES (?, ?, ?, ?, current_timestamp, 'RUNNING', 0) "
-            'ON CONFLICT (query_id) DO UPDATE SET '
-            'source = EXCLUDED.source, stix_pattern = EXCLUDED.stix_pattern, '
-            'native_query = EXCLUDED.native_query, started_at = EXCLUDED.started_at, '
-            "completed_at = NULL, status = 'RUNNING', result_count = 0, error = NULL",
-            (qid, source, stix_pattern, native_query),
-        )
+        try:
+            self.connection.execute(
+                'INSERT INTO "raw_query" '
+                '(query_id, source, stix_pattern, native_query, started_at, status, result_count) '
+                "VALUES (?, ?, ?, ?, current_timestamp, 'RUNNING', 0)",
+                (qid, source, stix_pattern, native_query),
+            )
+        except duckdb.ConstraintException as exc:
+            raise InvalidObject(
+                f"query_id {qid!r} already exists; use a new acquisition run id"
+            ) from exc
 
     def cache(self, query_id, bundles, source=None,
               stix_pattern=None, native_query=None):
@@ -299,6 +423,7 @@ class DuckDBStorage:
                 for obj_type in self._object_types(text):
                     self._insert_type_from_json(obj_type, text, qid)
 
+            install_views(self.connection, self.session_id)
             if qid:
                 self.connection.execute(
                     'UPDATE "raw_query" SET completed_at = current_timestamp, '
@@ -306,7 +431,6 @@ class DuckDBStorage:
                     (object_count, qid),
                 )
             self.connection.execute("COMMIT")
-            install_views(self.connection, self.session_id)
         except Exception as exc:
             self.connection.execute("ROLLBACK")
             if qid:
