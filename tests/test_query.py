@@ -24,8 +24,8 @@ from firepit.query import Unique
         ('foo', '=', 99, 'sqlite3', 1, '("foo" = ?)'),
         ('bar', '>=', 99, 'sqlite3', 1, '("bar" >= ?)'),
         ('baz', 'LIKE', '%blah%', 'sqlite3', 1, '("baz" LIKE ?)'),
-        ('baz', 'MATCHES', '^fooba.$', 'sqlite3', 1, '("baz" MATCH ?)'),
-        ('baz', 'MATCHES', '^fooba.$', 'postgresql', 1, '("baz" ~ %s)'),
+        ('baz', 'MATCHES', '^fooba.$', 'sqlite3', 1, '(match(?, "baz"))'),
+        ('baz', 'MATCHES', '^fooba.$', 'postgresql', 1, '(match(%s, "baz"))'),
     ]
 )
 def test_predicate(lhs, op, rhs, dialect, expected_len, expected_text):

@@ -234,8 +234,10 @@ class Predicate:
                 rhs = ', '.join([placeholder] * len(self.rhs))
             text = f'({_quote(self.lhs)} {self.op} ({rhs}))'
         elif op == 'MATCHES':
-            op = '~' if dialect == 'postgresql' else 'MATCH'
-            text = f'({_quote(self.lhs)} {op} {placeholder})'
+            # `match(pattern, value)` is a portable function form of
+            # SQLite's `value MATCH pattern` operator (args swapped),
+            # backed by a UDF/function on every supported backend.
+            text = f'(match({placeholder}, {_quote(self.lhs)}))'
         else:
             text = f'({_quote(self.lhs)} {self.op} {placeholder})'
         return text

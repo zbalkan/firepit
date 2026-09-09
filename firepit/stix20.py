@@ -43,8 +43,10 @@ def _convert_op(sco_type, prop, op, rhs, dialect):
         elif op == 'LIKE':
             return f'{neg} like_bin(CAST({rhs} AS TEXT), "{prop}")'
     elif op == 'MATCHES':
-        op = '~' if dialect == 'postgresql' else 'MATCH'
-        return f'{neg} "{prop}" {op} {rhs}'
+        # Portable function form of SQLite's `value MATCH pattern`
+        # operator (args swapped); backed by a UDF/function on every
+        # supported backend.
+        return f'{neg} match({rhs}, "{prop}")'
     prop, chunk, subprop = prop.partition('[*]')
     if chunk:
         if op == '!=':

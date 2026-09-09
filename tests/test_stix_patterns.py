@@ -50,7 +50,7 @@ def _normalize_ws(s):
         #TODO: need MATCHES example with PCRE that Python re doesn't support
         ('url',
          "[url:value MATCHES '^.*example\\..*']",
-         "\"value\" MATCH '^.*example\\..*'"),
+         "match('^.*example\\..*', \"value\")"),
     ]
 )
 def test_stix2sql(sco_type, pattern, where):
