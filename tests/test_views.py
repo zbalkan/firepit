@@ -1,136 +1,152 @@
+import json
+
 from firepit import get_storage
+from firepit._writer import ingest
+
+
+_INDICATOR_COLUMNS = [
+    "AdditionalFields",
+    "AzureTenantId",
+    "_BilledSize",
+    "Confidence",
+    "Created",
+    "Data",
+    "Id",
+    "IsActive",
+    "_IsBillable",
+    "IsDeleted",
+    "LastUpdateMethod",
+    "Modified",
+    "ObservableKey",
+    "ObservableValue",
+    "Pattern",
+    "_ResourceId",
+    "Revoked",
+    "SourceSystem",
+    "_SubscriptionId",
+    "Tags",
+    "TenantId",
+    "TimeGenerated",
+    "Type",
+    "ValidFrom",
+    "ValidUntil",
+    "WorkspaceId",
+]
+
+_OBJECT_COLUMNS = [
+    "AdditionalFields",
+    "AzureTenantId",
+    "_BilledSize",
+    "Data",
+    "Id",
+    "_IsBillable",
+    "IsDeleted",
+    "LastUpdateMethod",
+    "_ResourceId",
+    "SourceSystem",
+    "StixType",
+    "_SubscriptionId",
+    "TenantId",
+    "TimeGenerated",
+    "Type",
+    "WorkspaceId",
+]
 
 
 def _bundle():
-    src = "ipv4-addr--11111111-1111-4111-8111-111111111111"
-    dst = "ipv6-addr--22222222-2222-4222-8222-222222222222"
-    parent = "process--33333333-3333-4333-8333-333333333333"
-    child = "process--44444444-4444-4444-8444-444444444444"
-    user = "user-account--55555555-5555-4555-8555-555555555555"
-    conn = "network-traffic--66666666-6666-4666-8666-666666666666"
-    obs = "observed-data--77777777-7777-4777-8777-777777777777"
+    indicator_id = "indicator--11111111-1111-4111-8111-111111111111"
+    actor_id = "threat-actor--22222222-2222-4222-8222-222222222222"
+    relationship_id = "relationship--33333333-3333-4333-8333-333333333333"
     return {
         "type": "bundle",
         "objects": [
-            {"type": "ipv4-addr", "spec_version": "2.1", "id": src, "value": "192.0.2.10"},
-            {"type": "ipv6-addr", "spec_version": "2.1", "id": dst, "value": "2001:db8::10"},
-            {"type": "user-account", "spec_version": "2.1", "id": user, "account_login": "alice"},
-            {"type": "process", "spec_version": "2.1", "id": parent, "pid": 100, "command_line": "parent.exe"},
             {
-                "type": "process", "spec_version": "2.1", "id": child,
-                "pid": 200, "command_line": "child.exe", "parent_ref": parent,
-                "creator_user_ref": user, "opened_connection_refs": [conn],
+                "type": "indicator",
+                "spec_version": "2.1",
+                "id": indicator_id,
+                "created": "2026-09-09T10:00:00Z",
+                "modified": "2026-09-09T10:00:00Z",
+                "name": "Test IP",
+                "indicator_types": ["malicious-activity"],
+                "pattern": "[ipv4-addr:value = '192.0.2.1']",
+                "pattern_type": "stix",
+                "valid_from": "2026-09-09T10:00:00Z",
+                "confidence": 85,
+                "labels": ["test", "ip"],
             },
             {
-                "type": "network-traffic", "spec_version": "2.1", "id": conn,
-                "src_ref": src, "dst_ref": dst, "src_port": 50000,
-                "dst_port": 443, "protocols": ["tcp"],
+                "type": "threat-actor",
+                "spec_version": "2.1",
+                "id": actor_id,
+                "created": "2026-09-09T10:00:00Z",
+                "modified": "2026-09-09T10:00:00Z",
+                "name": "Example Actor",
+                "threat_actor_types": ["crime-syndicate"],
             },
             {
-                "type": "observed-data", "spec_version": "2.1", "id": obs,
-                "first_observed": "2026-09-09T10:00:00Z",
-                "last_observed": "2026-09-09T10:01:00Z",
-                "number_observed": 2, "object_refs": [child, conn],
+                "type": "relationship",
+                "spec_version": "2.1",
+                "id": relationship_id,
+                "created": "2026-09-09T10:00:00Z",
+                "modified": "2026-09-09T10:00:00Z",
+                "relationship_type": "indicates",
+                "source_ref": indicator_id,
+                "target_ref": actor_id,
             },
         ],
     }
 
 
-def test_native_reference_lists_are_canonical(tmpdir):
-    store = get_storage(str(tmpdir.join("refs.duckdb")), "hunt")
-    try:
-        store.cache("q1", _bundle())
-        assert len(store.connection.execute(
-            'SELECT opened_connection_refs FROM "process" WHERE pid = 200'
-        ).fetchone()[0]) == 1
-        assert len(store.connection.execute(
-            'SELECT object_refs FROM "observed-data"'
-        ).fetchone()[0]) == 2
-        internal = {
-            row[0] for row in store.connection.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
-                ("hunt",),
-            ).fetchall()
-        }
-        assert "__contains" not in internal
-        assert "__reflist" not in internal
-    finally:
-        store.close()
+def _as_json(value):
+    return json.loads(value) if isinstance(value, str) else value
 
 
-def test_observation_ref_view_expands_object_refs(tmpdir):
-    store = get_storage(str(tmpdir.join("refs.duckdb")), "hunt")
-    try:
-        store.cache("q1", _bundle())
-        rows = store.connection.execute(
-            'SELECT object_ref, number_observed FROM "observation_ref" ORDER BY object_ref'
-        ).fetchall()
+def test_indicator_view_uses_sentinel_foundation_and_preserves_full_data(tmpdir):
+    path = str(tmpdir.join("views.duckdb"))
+    ingest(path, "q1", _bundle(), session_id="hunt", source="test-feed")
+
+    with get_storage(path, "hunt") as store:
+        row = store.query_one('SELECT * FROM "ThreatIntelIndicators"')
+        assert list(row) == _INDICATOR_COLUMNS
+        assert row["Confidence"] == 85
+        assert row["IsDeleted"] is False
+        assert row["Revoked"] is False
+        assert row["SourceSystem"] == "test-feed"
+        assert row["Pattern"] == "[ipv4-addr:value = '192.0.2.1']"
+        assert row["ObservableKey"] is None
+        assert row["ObservableValue"] is None
+        assert row["Type"] == "ThreatIntelIndicators"
+        assert set(row["Tags"].split(",")) == {"test", "ip"}
+
+        data = _as_json(row["Data"])
+        assert data["id"] == row["Id"]
+        assert data["indicator_types"] == ["malicious-activity"]
+        assert data["pattern"] == row["Pattern"]
+
+
+def test_objects_view_excludes_indicators_and_keeps_relationship_data(tmpdir):
+    path = str(tmpdir.join("views.duckdb"))
+    ingest(path, "q1", _bundle(), session_id="hunt", source="test-feed")
+
+    with get_storage(path, "hunt") as store:
+        rows = store.query(
+            'SELECT * FROM "ThreatIntelObjects" ORDER BY StixType'
+        )
         assert len(rows) == 2
-        assert {row[1] for row in rows} == {2}
-    finally:
-        store.close()
+        assert list(rows[0]) == _OBJECT_COLUMNS
+        assert {row["StixType"] for row in rows} == {
+            "relationship",
+            "threat-actor",
+        }
+        assert all(row["IsDeleted"] is False for row in rows)
+        assert all(row["Type"] == "ThreatIntelObjects" for row in rows)
 
-
-def test_explicit_process_and_network_views(tmpdir):
-    store = get_storage(str(tmpdir.join("views.duckdb")), "hunt")
-    try:
-        store.cache("q1", _bundle())
-        process = store.connection.execute(
-            'SELECT parent_pid, parent_command_line, user_name '
-            'FROM "stixv_process" WHERE pid = 200'
-        ).fetchone()
-        assert process == (100, "parent.exe", "alice")
-
-        network = store.connection.execute(
-            'SELECT src_ipv4, src_ipv6, dst_ipv4, dst_ipv6 '
-            'FROM "stixv_network_traffic"'
-        ).fetchone()
-        assert network == ("192.0.2.10", None, None, "2001:db8::10")
-    finally:
-        store.close()
-
-
-def test_network_view_handles_domain_and_mac_references(tmpdir):
-    domain = "domain-name--88888888-8888-4888-8888-888888888888"
-    mac = "mac-addr--99999999-9999-4999-8999-999999999999"
-    conn = "network-traffic--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    bundle = {
-        "type": "bundle",
-        "objects": [
-            {"type": "domain-name", "spec_version": "2.1", "id": domain, "value": "example.com"},
-            {"type": "mac-addr", "spec_version": "2.1", "id": mac, "value": "00:11:22:33:44:55"},
-            {
-                "type": "network-traffic", "spec_version": "2.1", "id": conn,
-                "src_ref": mac, "dst_ref": domain, "protocols": ["ethernet", "ipv4", "tcp"],
-                "ipfix": {"octetDeltaCount": 12, "interfaceName": "wan0"},
-                "encapsulates_refs": [],
-            },
-        ],
-    }
-    store = get_storage(str(tmpdir.join("domain-mac.duckdb")), "hunt")
-    try:
-        store.cache("q1", bundle)
-        row = store.connection.execute(
-            'SELECT src_mac, src_domain, dst_mac, dst_domain '
-            'FROM "stixv_network_traffic" WHERE id = ?',
-            (conn,),
-        ).fetchone()
-        assert row == ("00:11:22:33:44:55", None, None, "example.com")
-        ipfix = store.connection.execute(
-            'SELECT ipfix FROM "network-traffic" WHERE id = ?', (conn,)
-        ).fetchone()[0]
-        assert 'octetDeltaCount' in str(ipfix)
-    finally:
-        store.close()
-
-
-def test_base_table_queries_do_not_auto_dereference(tmpdir):
-    store = get_storage(str(tmpdir.join("lookup.duckdb")), "hunt")
-    try:
-        store.cache("q1", _bundle())
-        row = store.connection.execute(
-            'SELECT parent_ref FROM "process" WHERE pid = 200'
-        ).fetchone()
-        assert row[0].startswith("process--")
-    finally:
-        store.close()
+        relationship = store.query_one(
+            'SELECT Id, '
+            "json_extract_string(Data, '$.source_ref') AS SourceRef, "
+            "json_extract_string(Data, '$.target_ref') AS TargetRef "
+            'FROM "ThreatIntelObjects" WHERE StixType = ?',
+            ("relationship",),
+        )
+        assert relationship["SourceRef"].startswith("indicator--")
+        assert relationship["TargetRef"].startswith("threat-actor--")
