@@ -1,8 +1,7 @@
 """async local storage for firepit"""
 
-from urllib.parse import urlparse
-
 from firepit.aio.asyncwrapper import SyncWrapper
+from firepit.storageurl import storage_path
 from firepit.validate import validate_name
 
 
@@ -14,7 +13,4 @@ def get_async_storage(connstring, session_id=None):
     """
     if session_id:
         validate_name(session_id)
-    url = urlparse(connstring)
-    if url.scheme in ('duckdb', ''):
-        return SyncWrapper(url.path, session_id)
-    raise NotImplementedError(url.scheme)
+    return SyncWrapper(storage_path(connstring), session_id)
