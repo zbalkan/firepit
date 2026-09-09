@@ -9,18 +9,18 @@ the explicit JSON provenance/fallback column.
 """
 
 from collections import defaultdict
-import logging
 
 import ujson
 
 from firepit import raft
 from firepit.duckdbstorage import DuckDBStorage
+from firepit.stixschema import ListType
+from firepit.stixschema import MapType
+from firepit.stixschema import StructType
 from firepit.stixschema import rendered_schema
 from firepit.stixschema import schema_for
 from firepit.validate import validate_name
 
-
-logger = logging.getLogger(__name__)
 
 _NATIVE_META = 'duckdb_native_model'
 _NATIVE_VERSION = '1'
@@ -50,6 +50,36 @@ def _bind_value(value, dtype):
         return None
     if dtype == 'JSON' or _is_nested(dtype):
         return ujson.dumps(value, ensure_ascii=False)
+    return value
+
+
+def _project_value(type_spec, value):
+    """Project *value* onto a known STIX schema shape.
+
+    STRUCT projection is intentionally selective: unknown keys are not sent to
+    DuckDB's STRUCT cast, but remain present in the enclosing object's ``_raw``
+    JSON.  This lets standard extensions use typed nested columns without
+    losing vendor extension members or future STIX fields.
+    """
+    if value is None:
+        return None
+    if isinstance(type_spec, StructType):
+        if not isinstance(value, dict):
+            return value
+        return {
+            name: _project_value(field_type, value.get(name))
+            for name, field_type in type_spec.fields.items()
+        }
+    if isinstance(type_spec, ListType):
+        values = value if isinstance(value, list) else [value]
+        return [_project_value(type_spec.element, item) for item in values]
+    if isinstance(type_spec, MapType):
+        if not isinstance(value, dict):
+            return value
+        return {
+            str(key): _project_value(type_spec.value, item)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -180,8 +210,11 @@ class NativeDuckDBStorage(DuckDBStorage):
     @staticmethod
     def _project(obj):
         obj_type = obj['type']
-        schema = rendered_schema(obj_type)
-        projected = {name: obj.get(name) for name in schema}
+        type_schema = schema_for(obj_type)
+        projected = {
+            name: _project_value(type_spec, obj.get(name))
+            for name, type_spec in type_schema.items()
+        }
         projected['_raw'] = obj
         return projected
 
