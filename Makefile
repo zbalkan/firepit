@@ -31,9 +31,7 @@ clean: clean-build clean-pyc clean-test ## remove all build, test, coverage and 
 clean-build: ## remove build artifacts
 	rm -fr build/
 	rm -fr dist/
-	rm -fr .eggs/
 	find . -name '*.egg-info' -exec rm -fr {} +
-	find . -name '*.egg' -exec rm -f {} +
 
 clean-pyc: ## remove Python file artifacts
 	find . -name '*.pyc' -exec rm -f {} +
@@ -52,9 +50,8 @@ clean-test: ## remove test and coverage artifacts
 
 hooks: .git/hooks/pre-commit
 
-setup: setup.py requirements_dev.txt hooks
-	python setup.py develop
-	pip install -r requirements_dev.txt
+setup: hooks ## install an editable development environment
+	python -m pip install -e ".[test,lint,docs,release]"
 
 .PHONY: check-safety
 check-safety:
@@ -71,7 +68,7 @@ lint: check-safety check-style
 test: ## run tests quickly with the default Python
 	pytest
 
-test-all: ## run tests on every Python version with tox
+test-all: ## run tests on every supported Python version with tox
 	tox
 
 test-cov: ## run tests with code coverage assessment
@@ -103,12 +100,11 @@ servedocs: docs ## compile the docs watching for changes
 	watchmedo shell-command -p '*.rst' -c '$(MAKE) -C docs html' -R -D .
 
 release: dist ## package and upload a release
-	twine upload dist/*
+	python -m twine upload dist/*
 
-dist: clean ## builds source and wheel package
-	python setup.py sdist
-	python setup.py bdist_wheel
+dist: clean ## build source and wheel packages through PEP 517
+	python -m build
 	ls -l dist
 
-install: clean ## install the package to the active Python's site-packages
-	python setup.py install
+install: clean ## install the package to the active Python environment
+	python -m pip install .
