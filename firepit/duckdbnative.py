@@ -1,18 +1,10 @@
-"""DuckDB-native STIX storage.
-
-The native store is authoritative. Known STIX 2.1 fields are stored with
-DuckDB scalar/LIST/MAP/STRUCT types; unknown/custom content remains in `_raw`
-JSON. Compatibility metadata is retained temporarily for the remaining legacy
-API and is removed by later modernization phases.
-"""
+"""DuckDB-native STIX storage with explicit acquisition provenance."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 import json
-import logging
 import os
-import re
 import uuid
 
 import duckdb
@@ -25,10 +17,8 @@ from firepit.stixschema import ListType, MapType, StructType
 from firepit.stixschema import rendered_schema, schema_for
 from firepit.validate import validate_name
 
-logger = logging.getLogger(__name__)
-
 _NATIVE_META = "duckdb_native_model"
-_NATIVE_VERSION = "2"
+_NATIVE_VERSION = "3"
 _NESTED_PREFIXES = ("MAP(", "STRUCT(")
 
 
@@ -79,9 +69,23 @@ def _project_value(type_spec, value):
     return value
 
 
-class Result:
-    """Small dict-row result wrapper used by the compatibility API."""
+def _materialize_bundle(bundle):
+    if isinstance(bundle, dict):
+        return bundle
+    if hasattr(bundle, "read"):
+        data = bundle.read()
+        if isinstance(data, bytes):
+            data = data.decode("utf-8")
+        return json.loads(data)
+    if isinstance(bundle, str):
+        if bundle.lstrip().startswith("{"):
+            return json.loads(bundle)
+        with open(bundle, "r", encoding="utf-8") as fp:
+            return json.load(fp)
+    raise TypeError("bundle must be a dict, JSON string, file-like object, or path")
 
+
+class Result:
     def __init__(self, columns=(), rows=()):
         self._columns = tuple(columns)
         self._rows = list(rows)
@@ -115,9 +119,7 @@ class NativeDuckDBStorage:
         self.connection.execute(
             f"CREATE SCHEMA IF NOT EXISTS {_qident(self.session_id)}"
         )
-        self.connection.execute(
-            f"SET search_path='{self.session_id}'"
-        )
+        self.connection.execute(f"SET search_path='{self.session_id}'")
         self._prepare_native_model()
 
     def close(self):
@@ -159,13 +161,23 @@ class NativeDuckDBStorage:
             )
 
         self.connection.execute(
-            'CREATE TABLE IF NOT EXISTS "__symtable" '
-            '(name VARCHAR PRIMARY KEY, type VARCHAR, appdata VARCHAR)'
+            'CREATE TABLE IF NOT EXISTS "raw_query" ('
+            'query_id VARCHAR PRIMARY KEY, source VARCHAR, stix_pattern VARCHAR, '
+            'native_query VARCHAR, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, '
+            'status VARCHAR, result_count UBIGINT, error VARCHAR)'
         )
         self.connection.execute(
-            'CREATE TABLE IF NOT EXISTS "__queries" '
-            '(sco_id VARCHAR, query_id VARCHAR)'
+            'CREATE TABLE IF NOT EXISTS "raw_bundle" ('
+            'bundle_id UUID PRIMARY KEY, query_id VARCHAR, received_at TIMESTAMPTZ, '
+            'bundle JSON)'
         )
+        self.connection.execute(
+            'CREATE TABLE IF NOT EXISTS "raw_run_object" ('
+            'query_id VARCHAR, object_id VARCHAR)'
+        )
+
+        # Temporary compatibility relations. Phase 4 removes these after all
+        # observation/list-reference queries use native lists directly.
         self.connection.execute(
             'CREATE TABLE IF NOT EXISTS "__contains" '
             '(source_ref VARCHAR, target_ref VARCHAR, x_firepit_rank INTEGER)'
@@ -179,13 +191,13 @@ class NativeDuckDBStorage:
             '(otype VARCHAR, path VARCHAR, shortname VARCHAR, dtype VARCHAR, '
             ' UNIQUE(otype, path))'
         )
+
         if not row:
             self.connection.execute(
                 'INSERT INTO "__metadata" (name, value) VALUES (?, ?)',
                 (_NATIVE_META, _NATIVE_VERSION),
             )
 
-        # Create the two SDO tables that Firepit historically guaranteed.
         self._create_native_table("identity")
         self._create_native_table("observed-data")
 
@@ -302,36 +314,56 @@ class NativeDuckDBStorage:
             stmt += " ON CONFLICT (id) DO UPDATE SET " + ", ".join(updates)
 
         values = []
-        qrows = []
+        memberships = []
         for row in rows:
             for name, dtype in zip(columns, dtypes):
                 values.append(_bind_value(row.get(name), dtype))
             if query_id and row.get("id"):
-                qrows.append((row["id"], str(query_id)))
+                memberships.append((str(query_id), row["id"]))
         self.connection.execute(stmt, values)
-        if qrows:
+        if memberships:
             self.connection.executemany(
-                'INSERT INTO "__queries" (sco_id, query_id) VALUES (?, ?)', qrows
+                'INSERT INTO "raw_run_object" (query_id, object_id) VALUES (?, ?)',
+                memberships,
             )
 
-    def cache(self, query_id, bundles, batchsize=2000, **_kwargs):
-        """Ingest STIX using the explicit DuckDB-native schema.
-
-        The active path never flattens nested STIX properties and never mutates
-        table schemas in response to an unknown property.
-        """
+    def cache(self, query_id, bundles, batchsize=2000, source=None,
+              stix_pattern=None, native_query=None, **_kwargs):
+        """Ingest STIX while keeping acquisition provenance separate from SCOs."""
         if not isinstance(bundles, list):
             bundles = [bundles]
+        materialized = [_materialize_bundle(bundle) for bundle in bundles]
+        qid = str(query_id) if query_id is not None else None
+
         pending = defaultdict(list)
         contains = []
         reflists = []
+        object_count = 0
         self.connection.execute("BEGIN")
         try:
-            for bundle in bundles:
+            if qid:
+                self.connection.execute(
+                    'INSERT INTO "raw_query" '
+                    '(query_id, source, stix_pattern, native_query, started_at, status, result_count) '
+                    "VALUES (?, ?, ?, ?, current_timestamp, 'RUNNING', 0) "
+                    'ON CONFLICT (query_id) DO UPDATE SET '
+                    'source = EXCLUDED.source, stix_pattern = EXCLUDED.stix_pattern, '
+                    'native_query = EXCLUDED.native_query, started_at = EXCLUDED.started_at, '
+                    "completed_at = NULL, status = 'RUNNING', result_count = 0, error = NULL",
+                    (qid, source, stix_pattern, native_query),
+                )
+
+            for bundle in materialized:
+                self.connection.execute(
+                    'INSERT INTO "raw_bundle" VALUES (?, ?, current_timestamp, ?::JSON)',
+                    (str(uuid.uuid4()), qid,
+                     json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))),
+                )
                 for obj in self._normalize_objects(bundle):
                     obj_type = obj.get("type")
                     if not obj_type:
                         continue
+                    object_count += 1
                     if "id" in obj:
                         obj["id"] = str(obj["id"])
                     cedges, redges = self._compat_edges(obj)
@@ -339,10 +371,11 @@ class NativeDuckDBStorage:
                     reflists.extend(redges)
                     pending[obj_type].append(self._project(obj))
                     if len(pending[obj_type]) >= batchsize:
-                        self._insert_rows(obj_type, pending[obj_type], query_id)
+                        self._insert_rows(obj_type, pending[obj_type], qid)
                         pending[obj_type].clear()
+
             for obj_type, rows in pending.items():
-                self._insert_rows(obj_type, rows, query_id)
+                self._insert_rows(obj_type, rows, qid)
             if contains:
                 self.connection.executemany(
                     'INSERT INTO "__contains" VALUES (?, ?, ?)', contains
@@ -351,15 +384,27 @@ class NativeDuckDBStorage:
                 self.connection.executemany(
                     'INSERT INTO "__reflist" VALUES (?, ?, ?)', reflists
                 )
+            if qid:
+                self.connection.execute(
+                    'UPDATE "raw_query" SET completed_at = current_timestamp, '
+                    "status = 'COMPLETED', result_count = ? WHERE query_id = ?",
+                    (object_count, qid),
+                )
             self.connection.execute("COMMIT")
-        except Exception:
+        except Exception as exc:
             self.connection.execute("ROLLBACK")
+            if qid:
+                self.connection.execute(
+                    'UPDATE "raw_query" SET completed_at = current_timestamp, '
+                    "status = 'FAILED', error = ? WHERE query_id = ?",
+                    (str(exc), qid),
+                )
             raise
 
     def load(self, viewname, objects, sco_type=None, query_id=None, preserve_ids=True):
         if not objects:
             return sco_type
-        query_id = query_id or str(uuid.uuid4())
+        qid = query_id or str(uuid.uuid4())
         normalized = []
         for obj in objects:
             if isinstance(obj, str):
@@ -377,82 +422,34 @@ class NativeDuckDBStorage:
                 obj["id"] = makeid(obj)
             normalized.append(obj)
             sco_type = sco_type or obj_type
-        self.cache(query_id, {"type": "bundle", "objects": normalized})
-        self.extract(viewname, sco_type, query_id, "")
+        self.cache(qid, {"type": "bundle", "objects": normalized})
+        self.extract(viewname, sco_type, qid, "")
         return sco_type
 
-    def reassign(self, viewname, objects):
-        if not objects:
-            return
-        for obj in objects:
-            if not isinstance(obj, dict) or not obj.get("id") or not obj.get("type"):
-                raise InvalidObject("reassign requires typed STIX objects with IDs")
-        self.cache(None, {"type": "bundle", "objects": objects})
-
-    def _create_view(self, viewname, select, sco_type=None):
+    def _create_view(self, viewname, select):
         validate_name(viewname)
         self.connection.execute(f"DROP VIEW IF EXISTS {_qident(viewname)}")
         self.connection.execute(f"CREATE VIEW {_qident(viewname)} AS {select}")
-        self.connection.execute(
-            'INSERT INTO "__symtable" (name, type) VALUES (?, ?) '
-            'ON CONFLICT (name) DO UPDATE SET type = EXCLUDED.type',
-            (viewname, sco_type),
-        )
 
     def extract(self, viewname, sco_type, query_id, pattern):
         validate_name(viewname)
         validate_name(sco_type)
         where = stix2sql(pattern, sco_type) if pattern else None
-        clauses = [
-            f'{_qident(sco_type)}.id IN ('
-            f'SELECT sco_id FROM "__queries" WHERE query_id = ?)'
-        ]
+        qid = str(query_id).replace("'", "''")
+        sql = (
+            f"SELECT * FROM {_qident(sco_type)} WHERE id IN ("
+            f'SELECT object_id FROM "raw_run_object" WHERE query_id = \'{qid}\')'
+        )
         if where:
-            clauses.append(where)
-        sql = f"SELECT * FROM {_qident(sco_type)} WHERE " + " AND ".join(clauses)
-        # View definitions cannot contain parameters.
-        escaped = str(query_id).replace("'", "''")
-        sql = sql.replace("?", f"'{escaped}'", 1)
-        self._create_view(viewname, sql, sco_type)
+            sql += f" AND ({where})"
+        self._create_view(viewname, sql)
 
     def filter(self, viewname, sco_type, input_view, pattern):
         where = stix2sql(pattern, sco_type) if pattern else None
         sql = f"SELECT * FROM {_qident(input_view)}"
         if where:
             sql += f" WHERE {where}"
-        self._create_view(viewname, sql, sco_type)
-
-    def assign(self, viewname, on, op=None, by=None, ascending=True, limit=None):
-        sql = f"SELECT * FROM {_qident(on)}"
-        if op == "sort" and by:
-            _, _, column = by.rpartition(":")
-            sql += f" ORDER BY {_qident(column)} {'ASC' if ascending else 'DESC'}"
-            if limit:
-                sql += f" LIMIT {int(limit)}"
-        elif op == "group" and by:
-            _, _, column = by.rpartition(":")
-            sql = (
-                f"SELECT {_qident(column)}, COUNT(*) AS count "
-                f"FROM {_qident(on)} GROUP BY {_qident(column)}"
-            )
-        self._create_view(viewname, sql, self.table_type(on) or on)
-
-    def join(self, viewname, l_var, l_on, r_var, r_on):
-        _, _, lcol = l_on.rpartition(":")
-        _, _, rcol = r_on.rpartition(":")
-        sql = (
-            f"SELECT * FROM {_qident(l_var)} l JOIN {_qident(r_var)} r "
-            f"ON l.{_qident(lcol)} = r.{_qident(rcol)}"
-        )
-        self._create_view(viewname, sql, self.table_type(l_var) or l_var)
-
-    def merge(self, viewname, input_views):
-        if not input_views:
-            raise ValueError("input_views must not be empty")
-        sql = " UNION BY NAME ".join(
-            f"SELECT * FROM {_qident(name)}" for name in input_views
-        )
-        self._create_view(viewname, sql, self.table_type(input_views[0]))
+        self._create_view(viewname, sql)
 
     def lookup(self, viewname, cols="*", limit=None, offset=None, col_dict=None):
         del col_dict
@@ -469,10 +466,11 @@ class NativeDuckDBStorage:
         if offset:
             sql += f" OFFSET {int(offset)}"
         rows = self._query(sql).fetchall()
-        obj_type = self.table_type(viewname) or viewname
-        if cols == "*" or "type" in cols:
-            for row in rows:
-                row.setdefault("type", obj_type)
+        if cols == "*":
+            obj_type = viewname if self._table_exists(viewname) else None
+            if obj_type:
+                for row in rows:
+                    row.setdefault("type", obj_type)
         return rows
 
     def values(self, path, viewname):
@@ -505,11 +503,11 @@ class NativeDuckDBStorage:
             f'JOIN "__contains" c ON v.id = c.target_ref '
             f'JOIN "observed-data" o ON c.source_ref = o.id'
         )
-        values = []
+        params = []
         if value is not None:
             sql += f" WHERE v.{_qident(column)} = ?"
-            values.append(value)
-        row = self._query(sql, values).fetchone()
+            params.append(value)
+        row = self._query(sql, params).fetchone()
         return int(row["count"] or 0) if row else self.count(viewname)
 
     def summary(self, viewname, path=None, value=None):
@@ -521,12 +519,12 @@ class NativeDuckDBStorage:
             f'JOIN "__contains" c ON v.id = c.target_ref '
             f'JOIN "observed-data" o ON c.source_ref = o.id'
         )
-        values = []
+        params = []
         if path and value is not None:
             _, _, column = path.rpartition(":")
             sql += f" WHERE v.{_qident(column)} = ?"
-            values.append(value)
-        row = self._query(sql, values).fetchone()
+            params.append(value)
+        row = self._query(sql, params).fetchone()
         if not row or row["number_observed"] is None:
             return {
                 "first_observed": None,
@@ -539,7 +537,7 @@ class NativeDuckDBStorage:
     def timestamped(self, viewname, path=None, value=None,
                     timestamp="first_observed", limit=None, run=True):
         if not run:
-            raise NotImplementedError("query-object output is being retired")
+            raise NotImplementedError("query-object output is retired")
         projection = [f"o.{_qident(timestamp)} AS {_qident(timestamp)}"]
         if path:
             paths = path if isinstance(path, (list, tuple)) else [path]
@@ -567,11 +565,12 @@ class NativeDuckDBStorage:
             "WHERE table_schema = ? AND table_type = 'BASE TABLE'",
             (self.session_id,),
         ).fetchall()
-        return [r["table_name"] for r in rows if not r["table_name"].startswith("__")]
+        return [row["table_name"] for row in rows if not row["table_name"].startswith("__")]
 
     def types(self, private=False):
-        rows = self.tables()
-        return rows if private else [name for name in rows if not name.startswith("__")]
+        internal = {"raw_query", "raw_bundle", "raw_run_object"}
+        rows = [name for name in self.tables() if name not in internal]
+        return rows if private else rows
 
     def views(self):
         rows = self._query(
@@ -581,12 +580,7 @@ class NativeDuckDBStorage:
         return [row["view_name"] for row in rows]
 
     def table_type(self, viewname):
-        if self._table_exists(viewname):
-            return viewname
-        row = self._query(
-            'SELECT type FROM "__symtable" WHERE name = ?', (viewname,)
-        ).fetchone()
-        return row["type"] if row else None
+        return viewname if self._table_exists(viewname) else None
 
     def columns(self, viewname):
         try:
@@ -610,42 +604,12 @@ class NativeDuckDBStorage:
                 result.append({"table": table, **row})
         return result
 
-    def set_appdata(self, viewname, data):
-        self.connection.execute(
-            'UPDATE "__symtable" SET appdata = ? WHERE name = ?',
-            (data, viewname),
-        )
-
-    def get_appdata(self, viewname):
-        row = self.connection.execute(
-            'SELECT appdata FROM "__symtable" WHERE name = ?', (viewname,)
+    def provenance(self, query_id=None):
+        if query_id is None:
+            return self._query('SELECT * FROM "raw_query" ORDER BY started_at').fetchall()
+        return self._query(
+            'SELECT * FROM "raw_query" WHERE query_id = ?', (str(query_id),)
         ).fetchone()
-        return row[0] if row else None
-
-    def get_view_data(self, viewnames=None):
-        if viewnames:
-            placeholders = ", ".join(["?"] * len(viewnames))
-            return self._query(
-                f'SELECT * FROM "__symtable" WHERE name IN ({placeholders})',
-                tuple(viewnames),
-            ).fetchall()
-        return self._query('SELECT * FROM "__symtable"').fetchall()
-
-    def remove_view(self, viewname):
-        self.connection.execute(f"DROP VIEW IF EXISTS {_qident(viewname)}")
-        self.connection.execute('DELETE FROM "__symtable" WHERE name = ?', (viewname,))
-
-    def rename_view(self, oldname, newname):
-        view_type = self.table_type(oldname)
-        sql = self.connection.execute(
-            "SELECT sql FROM duckdb_views() WHERE schema_name = ? AND view_name = ?",
-            (self.session_id, oldname),
-        ).fetchone()
-        if not sql:
-            raise UnknownViewname(oldname)
-        definition = re.sub(r"^CREATE VIEW\s+\S+\s+AS\s+", "", sql[0], count=1).rstrip(";")
-        self._create_view(newname, definition, view_type)
-        self.remove_view(oldname)
 
     def delete(self):
         self.connection.execute(f"DROP SCHEMA IF EXISTS {_qident(self.session_id)} CASCADE")
