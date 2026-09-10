@@ -30,6 +30,7 @@ __firepit_<session>
 public <session> schema
     - ThreatIntelIndicators
     - ThreatIntelObjects
+    - derived hunting views
     |
     v
 Firepit query-only API
@@ -61,14 +62,21 @@ The final physical model uses a private `__firepit_<session>` schema for acquisi
 
 Canonical mutable STIX objects are selected by `modified` timestamp, not arrival order. Conflicting content at the same version and immutable-ID reuse are rejected.
 
-### Two-view public contract
+### Public view contract
 
-The analyst-facing schema contains exactly two views and no base tables:
+The analyst-facing schema contains no base tables. Two Sentinel-inspired views form the stable foundation:
 
 - `ThreatIntelIndicators`
 - `ThreatIntelObjects`
 
-Their layout is inspired by Microsoft Sentinel's current threat-intelligence tables. The complete canonical STIX object remains available in `Data`.
+Four additional views are derived only from those two main views to preserve useful historical Firepit hunting semantics without restoring the old query engine:
+
+- `ThreatIntelObservedObjects` — observed-data/object expansion and timestamp context;
+- `ThreatIntelObservationSummary` — observation record count, summed `number_observed`, and first/last timestamps;
+- `ThreatIntelValueCounts` — scalar STIX property value counts over observed objects;
+- `ThreatIntelRelationships` — relationship endpoint expansion and common dereference fields.
+
+The complete canonical STIX object remains available in `Data`.
 
 ### Query-only API
 
@@ -79,7 +87,7 @@ The public `Firepit` handle:
 - rejects DDL, DML, `PRAGMA`, `ATTACH`, multiple statements, internal schemas, and catalog relations;
 - opens DuckDB read-only;
 - disables external access;
-- verifies that the public schema contains exactly the two expected views and zero base tables.
+- verifies that the public schema contains exactly the expected public views and zero base tables.
 
 ### Packaging and repository cleanup
 
@@ -97,9 +105,10 @@ The final test suite is intended to cover:
 - duplicate acquisition-run rejection;
 - immutable-ID and same-version conflict detection;
 - provenance independent from canonical identity;
-- exactly two public views and zero public base tables;
-- Sentinel-inspired indicator/object view columns;
+- the two main Sentinel-style views plus four derived hunting views;
+- zero public base tables;
 - complete `Data` preservation;
+- observed-data expansion, observation summaries, value counts, and relationship expansion;
 - absence of exposed DuckDB handles;
 - rejection of write SQL, multiple statements, internals, catalogs, attachments, and external file access;
 - persistence and reopen behavior;
@@ -107,4 +116,4 @@ The final test suite is intended to cover:
 
 ## End state
 
-Firepit is now a small query-only STIX 2.1 threat-intelligence interface. Acquisition and physical storage are private implementation concerns; analysts see two stable threat-intelligence views and a constrained read-only query API.
+Firepit is now a small query-only STIX 2.1 threat-intelligence interface. Acquisition and physical storage are private implementation concerns; analysts see two stable Sentinel-style main views, four derived hunting views, and a constrained read-only query API.
