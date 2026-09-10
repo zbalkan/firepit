@@ -1,56 +1,52 @@
 # Usage
 
-Firepit exposes a query-only threat-intelligence surface backed by DuckDB. Acquisition stays above Firepit; analysts query public views only.
+Firepit exposes a read-only SQL surface over public DuckDB views. Acquisition stays above Firepit; internal physical tables are not part of the analyst contract.
 
 ## Open a session
 
 ```python
 from firepit import get_storage
 
-store = get_storage("intel.duckdb", "hunt")
+store = get_storage("observations.duckdb", "hunt")
 ```
 
-A session is a public DuckDB schema containing views only. Physical tables live in a private Firepit schema and are not part of the user contract.
+A session is a DuckDB schema containing public views only.
 
-## Main views
+## Query tiers
 
-`ThreatIntelIndicators` and `ThreatIntelObjects` are the two Sentinel-inspired main views.
+### Base views
 
-```python
-rows = store.query("""
-    SELECT Id, Confidence, Pattern
-    FROM ThreatIntelIndicators
-    WHERE Confidence >= ?
-""", (70,))
+Use the Sentinel-compatible base views when portability and schema stability matter most:
+
+```sql
+SELECT Id, Confidence, Pattern
+FROM ThreatIntelIndicators
+WHERE Confidence >= 70;
 ```
 
-The complete STIX object remains available in the `Data` JSON column.
+The base contracts are `ThreatIntelIndicators` and `ThreatIntelObjects` and are intentionally kept unchanged.
 
-## Derived hunting views
+### Extended `Ex` views
 
-The old Firepit storage API contained several fixed analytical query patterns. Version 3 exposes the useful ones as views rather than Python methods or mutable variables.
+Use `ThreatIntel<Semantic>Ex` when the query would otherwise require repeated relationship traversal, observation expansion, or aggregation.
 
-### ThreatIntelObservedObjects
-
-Expands STIX 2.1 `observed-data.object_refs` and associates each referenced object with the observation timestamps and `number_observed` value.
+Threat actors related to any intelligence object:
 
 ```sql
 SELECT
-    ObservationId,
-    ObjectId,
-    StixType,
-    FirstObserved,
-    LastObserved,
-    NumberObserved,
-    Data
-FROM ThreatIntelObservedObjects;
+    ThreatActorName,
+    RelationshipType,
+    RelatedStixType,
+    RelatedName,
+    RelatedValue,
+    RelatedPattern
+FROM ThreatIntelActorRelationsEx
+WHERE ThreatActorName = 'Sangria Tempest';
 ```
 
-This replaces the historical `timestamped()` and observed-data attribute extraction patterns.
+The view already normalizes both relationship directions. There is no need to build separate source/target branches and `UNION` them.
 
-### ThreatIntelObservationSummary
-
-Aggregates observation history per referenced object:
+Observation history for an object:
 
 ```sql
 SELECT
@@ -60,51 +56,84 @@ SELECT
     ObservationCount,
     FirstObserved,
     LastObserved
-FROM ThreatIntelObservationSummary;
+FROM ThreatIntelObservationSummaryEx
+WHERE ObjectId = ?;
 ```
 
-`ObservationRecords` counts object/observation associations. `ObservationCount` sums STIX `number_observed`. This replaces the old `summary()` and `number_observed()` helpers while keeping the two quantities explicit.
-
-### ThreatIntelValueCounts
-
-Flattens scalar properties from observed SCO JSON and aggregates their observation frequency:
+Common observable/value counts:
 
 ```sql
 SELECT
-    StixPath,
-    Value,
+    ObservableKey,
+    ObservableValue,
+    ObjectCount,
     ObservationRecords,
-    ObservationCount
-FROM ThreatIntelValueCounts
-WHERE StixType = 'ipv4-addr'
-ORDER BY ObservationCount DESC;
+    ObservationCount,
+    FirstObserved,
+    LastObserved
+FROM ThreatIntelObservableStatsEx
+WHERE ObservableValue = '192.0.2.1';
 ```
 
-Array indexes are normalized to `[*]`, giving paths such as `file:hashes.SHA-256` or repeated-property paths with wildcard indexes. This replaces the old path-oriented `value_counts()` behavior.
+`ObservationRecords` counts linked `observed-data` SDOs. `ObservationCount` sums their `number_observed` values.
 
-### ThreatIntelRelationships
+### Wide `W` views
 
-Expands relationship source and target references and resolves common `name` and `value` properties from the two main views:
+Use the `W` views for interactive search and hunting when repeatedly extracting fields from `Data` would add noise.
 
 ```sql
 SELECT
-    RelationshipType,
-    SourceStixType,
-    SourceName,
-    SourceValue,
-    TargetStixType,
-    TargetName,
-    TargetValue
-FROM ThreatIntelRelationships;
+    NetworkIP,
+    DomainName,
+    FileHashType,
+    FileHashValue,
+    ThreatActorNames,
+    Confidence,
+    Pattern
+FROM ThreatIntelIndicatorsW
+WHERE NetworkIP = '192.0.2.1';
 ```
 
-This covers the most common historical `join()` and reference-dereference use cases without reintroducing recursive auto-dereferencing.
+The equivalent actor correlation in raw Sentinel-style queries requires relationship extraction, source/target joins, and a union. `ThreatIntelIndicatorsW` precomputes the common actor linkage.
 
-## Query-only boundary
+For general STIX objects:
 
-The public object exposes `query()`, `query_one()`, `query_value()`, `indicators()`, and `objects()`. It does not expose a DuckDB connection, cursor, DDL/DML execution, ingestion, or deletion APIs.
+```sql
+SELECT
+    StixType,
+    Name,
+    Value,
+    RelationshipType,
+    SourceName,
+    TargetName,
+    Pid,
+    CommandLine,
+    SrcPort,
+    DstPort
+FROM ThreatIntelObjectsW
+WHERE StixType IN ('relationship', 'process', 'network-traffic');
+```
 
-Queries must contain exactly one `SELECT` statement. The database is opened read-only and external access is disabled.
+The `W` views preserve one output row per base-view row. They add search columns but do not explode arrays or relationships.
+
+## Pattern-derived wide columns
+
+`ThreatIntelIndicatorsW` extracts common equality-pattern values for IPv4, IPv6, domain, email, URL, network source/destination IP, file hashes, and X.509 fields. These columns are convenience projections, not a replacement STIX pattern engine.
+
+Complex patterns using boolean combinations, `IN`, comparison operators, qualifiers, or unsupported object paths must still be evaluated from the original `Pattern` value. The raw STIX `Data` and `Pattern` remain authoritative.
+
+## Read-only contract
+
+Firepit accepts one `SELECT` statement per query. The public object does not expose a DuckDB connection, cursor, DDL, or DML operation. External access and direct access to Firepit's internal schemas/catalog surfaces are blocked by the query wrapper.
+
+```python
+rows = store.query(
+    "SELECT Id, Name FROM ThreatIntelIndicatorsW WHERE Confidence >= ?",
+    (70,),
+)
+```
+
+Convenience methods `indicators()` and `objects()` continue to target the two base views.
 
 ## Close
 
