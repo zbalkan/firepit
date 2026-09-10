@@ -1,80 +1,102 @@
 # Usage
 
-Firepit is a thin STIX 2.1 ingestion and storage component. Acquisition stays above Firepit; analysis uses DuckDB directly.
+Firepit exposes a query-only interface over two public threat-intelligence views. The underlying DuckDB database and physical Firepit tables are implementation details.
 
 ## Open a session
 
 ```python
 from firepit import get_storage
 
-store = get_storage("observations.duckdb", "hunt")
+store = get_storage("intel.duckdb", "hunt")
 ```
 
-A session is a DuckDB schema inside the database file.
+The session name selects the public schema. That schema must contain exactly:
 
-## Ingest STIX 2.1
+- `ThreatIntelIndicators`
+- `ThreatIntelObjects`
+
+and no base tables. If the public schema has been altered out of band, Firepit refuses to open it.
+
+## Query indicators
 
 ```python
-store.cache(
-    "query-1",
-    bundle_json,
-    source="source-name",
-    stix_pattern="[process:pid = 1234]",
-    native_query="vendor native query",
+rows = store.query(
+    """
+    SELECT Id, Confidence, Pattern, ValidFrom, ValidUntil
+    FROM ThreatIntelIndicators
+    WHERE Confidence >= ?
+    ORDER BY Confidence DESC
+    """,
+    (70,),
 )
 ```
 
-`bundle_json` may be a Python dictionary, raw JSON text, a file-like object, or a local file path. Firepit performs no HTTP acquisition.
+Rows are returned as dictionaries keyed by the selected column names.
 
-Ingestion is transactional. Known STIX fields are cast to the types declared by `stixschema.py`; incompatible known values fail the run. `raw_query` records `COMPLETED` or `FAILED` state, and successful raw bundles are retained in `raw_bundle`.
-
-## Query with DuckDB
-
-Use the underlying DuckDB connection directly:
+For common cases:
 
 ```python
-rows = store.connection.execute("""
+rows = store.indicators("Confidence >= ?", (70,), limit=100)
+```
+
+## Query other STIX objects
+
+```python
+actors = store.objects("StixType = ?", ("threat-actor",))
+
+relationship = store.query_one(
+    """
+    SELECT Id, Data
+    FROM ThreatIntelObjects
+    WHERE StixType = 'relationship'
+    LIMIT 1
+    """
+)
+```
+
+The full canonical STIX object is available in `Data` as JSON, so normal DuckDB JSON expressions can be used inside a permitted `SELECT`:
+
+```python
+rows = store.query(
+    """
     SELECT
-        id,
-        pid,
-        command_line,
-        extensions."windows-process-ext".owner_sid
-    FROM process
-    WHERE pid IS NOT NULL
-""").fetchall()
+        Id,
+        json_extract_string(Data, '$.name') AS Name
+    FROM ThreatIntelObjects
+    WHERE StixType = 'threat-actor'
+    """
+)
 ```
 
-There is no Firepit `lookup()`, `filter()`, `extract()`, query AST, or local STIX-pattern compiler in version 3.
+## Scalar queries
 
-## Observation semantics
-
-STIX observation records and represented event counts are different quantities. Firepit exposes them explicitly:
-
-```sql
-SELECT
-    object_ref,
-    observation_records,
-    observation_count,
-    first_observed,
-    last_observed
-FROM observation_summary;
+```python
+count = store.query_value(
+    "SELECT count(*) FROM ThreatIntelIndicators"
+)
 ```
 
-`observation_records` counts linked `observed-data` objects. `observation_count` sums their `number_observed` values.
+`query_one()` returns the first row as a dictionary or `None`. `query_value()` returns the first column of the first row or `None`.
 
-## Reference enrichment
+## Query restrictions
 
-References remain IDs or native lists in base tables. Firepit does not auto-dereference `SELECT *`.
+Firepit accepts exactly one `SELECT` statement. The public API rejects:
 
-Use explicit views when useful:
+- `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and other DML;
+- `CREATE`, `DROP`, `ALTER`, and other DDL;
+- `PRAGMA` and `ATTACH`;
+- multiple SQL statements;
+- direct references to `__firepit_*` schemas;
+- DuckDB, `information_schema`, PostgreSQL-compatibility, and SQLite-compatibility catalog relations;
+- external file access such as `read_csv_auto()`.
 
-```sql
-SELECT pid, parent_pid, user_name, image_name
-FROM stixv_process;
+The DuckDB connection is not exposed by the public object.
 
-SELECT src_ipv4, src_ipv6, dst_ipv4, dst_ipv6
-FROM stixv_network_traffic;
-```
+## Acquisition
+
+Acquisition is intentionally separate from the public query API. Firepit's private writer is used by acquisition/orchestration code, not by analyst-facing callers. Standard STIX 2.1 objects are validated with OASIS `cti-python-stix2`; custom object envelopes are preserved without pretending Firepit has an authoritative custom schema.
+
+Users of the query interface do not need the ingestion extra.
 
 ## Close
 
@@ -82,8 +104,9 @@ FROM stixv_network_traffic;
 store.close()
 ```
 
-For interactive exploration, open the same database in DuckDB UI:
+or use a context manager:
 
-```bash
-duckdb observations.duckdb -ui
+```python
+with get_storage("intel.duckdb", "hunt") as store:
+    count = store.query_value("SELECT count(*) FROM ThreatIntelObjects")
 ```

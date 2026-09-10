@@ -2,30 +2,31 @@
 
 ## 3.0.0
 
-Firepit 3 is a breaking architectural reduction centered on DuckDB and STIX 2.1.
+Firepit 3 is a breaking architectural reduction centered on DuckDB, STIX 2.1, and a query-only public contract.
 
 Major changes:
 
-- DuckDB is the sole database backend.
+- DuckDB is the sole database engine.
 - CPython 3.11-3.14 is supported.
 - Packaging is defined in `pyproject.toml`.
+- The public API no longer exposes DuckDB connections, cursors, mutation methods, or arbitrary execution objects.
+- The public session schema contains exactly two Sentinel-inspired views: `ThreatIntelIndicators` and `ThreatIntelObjects`.
+- Physical canonical-object and provenance tables moved behind a private `__firepit_<session>` schema.
+- Standard STIX 2.1 validation is delegated to OASIS `cti-python-stix2` through the optional ingestion dependency set.
+- The handwritten STIX schema module was removed.
+- The complete canonical STIX object is preserved in each public view's `Data` column.
+- Canonical mutable objects are ordered by STIX `modified` time instead of arrival order.
+- Duplicate acquisition run IDs, conflicting same-version objects, and immutable-ID content changes are rejected.
 - STIX 2.0 embedded-object compatibility was removed.
-- Raw STIX 2.1 JSON is parsed and projected by DuckDB.
-- Known STIX fields use scalar, `LIST`, `MAP`, and `STRUCT` types.
-- Unknown/custom content is preserved in `_raw` and immutable raw-bundle provenance.
-- Dynamic schema inference/`ALTER TABLE` ingestion was removed.
-- SQLite/PostgreSQL dialect abstractions were removed.
-- Kestrel-era `__symtable`, appdata, mutable hunt variables, and `__queries` semantics were removed.
-- Provenance now uses `raw_query`, `raw_bundle`, and `raw_run_object`.
-- `__contains`, `__reflist`, and recursive auto-dereference were removed.
-- The generic query AST, heuristic aggregation, and local STIX-pattern compiler were removed.
+- SQLite/PostgreSQL backends and dialect abstractions were removed.
+- Kestrel-era symtable/appdata/mutable-variable semantics were removed.
+- Relationship emulation tables and recursive auto-dereference were removed.
+- The generic relational query AST, heuristic aggregation, and local STIX-pattern compiler were removed.
 - AIO/Pandas ingestion, HTTP acquisition, `splint`, `woodchipper`, and the Firepit CLI were removed.
-- Observation record count and `number_observed` sum are exposed explicitly through `observation_summary`.
-- Known-field type mismatches fail ingestion instead of silently becoming null.
-- Pre-native/older native databases are rejected explicitly.
-- Runtime dependencies were reduced to `duckdb`.
+- The query-only installation depends only on `duckdb`; `stix2` is optional for the private ingestion path.
+- Legacy setuptools, tox, Makefile, Pylint, requirements-file, and Sphinx/RST scaffolding was removed.
 
-The implementation history is recorded in [MODERNIZATION_ROADMAP.md](MODERNIZATION_ROADMAP.md).
+The implementation history is summarized in [MODERNIZATION_ROADMAP.md](MODERNIZATION_ROADMAP.md).
 
 ## 2.x and earlier
 

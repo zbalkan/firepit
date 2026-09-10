@@ -1,88 +1,115 @@
 # Database model
 
-Firepit stores STIX 2.1 using DuckDB-native types and retains raw provenance.
+Firepit separates its physical DuckDB representation from the analyst-facing schema.
 
-## Modeling rules
+## Public schema
+
+For a session named `hunt`, the public schema is `hunt`. It contains exactly two views and no base tables:
 
 ```text
-Known scalar field       -> scalar column
-Known nested object      -> STRUCT
-Known repeated scalar    -> LIST<T>
-Known repeated object    -> LIST<STRUCT<...>>
-Homogeneous dictionary   -> MAP
-Known heterogeneous field-> JSON
-Unknown/custom content   -> _raw JSON
-Original bundle          -> raw_bundle JSON
+hunt.ThreatIntelIndicators
+hunt.ThreatIntelObjects
 ```
 
-JSON is the exception for analytical data, not the default representation.
+These names and their broad column layout are based on Microsoft Sentinel's current threat-intelligence tables so analysts can reuse familiar concepts and query patterns.
 
-## Typed STIX tables
+### ThreatIntelIndicators
 
-Each encountered STIX object type receives one typed table. Known schema comes from `firepit/stixschema.py`; ingestion does not infer types or execute `ALTER TABLE ADD COLUMN` for new custom fields.
+Contains canonical STIX `indicator` objects. Important columns include:
 
-Example:
+- `Id`
+- `Confidence`
+- `Created`
+- `Modified`
+- `Pattern`
+- `ValidFrom`
+- `ValidUntil`
+- `Revoked`
+- `IsActive`
+- `SourceSystem`
+- `Tags`
+- `TimeGenerated`
+- `Data`
 
-```sql
-SELECT
-    id,
-    pid,
-    command_line,
-    environment_variables,
-    extensions."windows-process-ext".owner_sid
-FROM process;
+`Data` contains the complete canonical STIX object as JSON. Firepit does not truncate the object.
+
+`ObservableKey` and `ObservableValue` are currently nullable. Firepit does not maintain a second STIX-pattern parser merely to derive them.
+
+### ThreatIntelObjects
+
+Contains every canonical stored STIX object except indicators. Important columns include:
+
+- `Id`
+- `StixType`
+- `SourceSystem`
+- `TimeGenerated`
+- `Data`
+
+Relationships are therefore queried as ordinary STIX objects. For example:
+
+```python
+rows = store.query(
+    """
+    SELECT
+        Id,
+        json_extract_string(Data, '$.source_ref') AS SourceRef,
+        json_extract_string(Data, '$.target_ref') AS TargetRef
+    FROM ThreatIntelObjects
+    WHERE StixType = 'relationship'
+    """
+)
 ```
 
-Unknown or future properties remain in `_raw`:
+## Sentinel compatibility
 
-```sql
-SELECT json_extract(_raw, '$.x_vendor_context')
-FROM process;
+The views intentionally resemble Sentinel rather than attempting byte-for-byte equivalence. Azure-specific columns such as tenant, workspace, resource, subscription, and billing fields are present where useful for query portability but are `NULL` when Firepit has no corresponding concept.
+
+`IsDeleted` is false because deletion is not an analyst-facing Firepit operation. `LastUpdateMethod` identifies Firepit. `TimeGenerated` represents the latest successful ingestion time for the canonical object.
+
+## Internal physical schema
+
+The private schema is named:
+
+```text
+__firepit_<session>
 ```
 
-## Strict projection
+For example:
 
-DuckDB performs JSON iteration, extraction, and casting. Known nested and scalar values are cast to the declared type. A conversion failure aborts the ingestion transaction and records the acquisition run as failed.
-
-## References
-
-Scalar references such as `parent_ref`, `src_ref`, and `dst_ref` remain IDs. Repeated references such as `object_refs`, `contains_refs`, and `opened_connection_refs` remain `VARCHAR[]`.
-
-`observation_ref` expands only observation membership:
-
-```sql
-SELECT observed_data_id, object_ref, number_observed
-FROM observation_ref;
+```text
+__firepit_hunt
 ```
 
-`observation_summary` makes the two observation quantities explicit:
+Its current implementation includes internal relations for:
 
-```sql
-SELECT
-    object_ref,
-    observation_records,
-    observation_count,
-    first_observed,
-    last_observed
-FROM observation_summary;
+```text
+metadata
+runs
+bundles
+objects
+run_objects
 ```
 
-Common process and network enrichment is exposed through explicit `stixv_process` and `stixv_network_traffic` views rather than recursive auto-dereference.
+These names are documentation of the current implementation, not a public compatibility contract. User code must not query or mutate them.
 
-## Provenance
+The canonical `objects` relation stores selected metadata used by the public views plus the complete STIX object in a JSON `data` column. This avoids duplicating the full OASIS STIX schema as a hand-maintained Firepit schema.
 
-Provenance is independent of stable SCO identity:
+## STIX validation
 
-- `raw_query` stores acquisition-run metadata and status;
-- `raw_bundle` stores successful original STIX bundles;
-- `raw_run_object` associates a run with object IDs.
+The private ingestion path uses OASIS `cti-python-stix2` for standard STIX 2.1 objects. Firepit therefore delegates standard object properties and semantic constraints to the reference implementation instead of maintaining a parallel handwritten schema.
 
-The same SCO can therefore appear in multiple acquisition runs without duplicating its typed row or losing run provenance.
+Unknown custom object types cannot have an authoritative schema inferred by Firepit. Their type, identifier, and version envelope are validated, and their full content is retained in `Data`.
 
-## Idempotence
+## Canonical object versioning
 
-Object IDs are the typed-table conflict key. Re-ingesting the same object ID does not add `number_observed` again. Multiple distinct `observed-data` objects that reference the same SCO remain distinct and are aggregated only in analytical views.
+Object identity is the STIX ID. For mutable STIX objects, a version with a later `modified` timestamp replaces an older canonical version regardless of arrival order. An older version arriving later does not overwrite the newer canonical object. Different content with the same ID and same `modified` timestamp is rejected.
 
-## Schema version
+For immutable objects without `modified`, reusing the same ID with different content is rejected.
 
-Firepit 3 uses native model version 6. Older/pre-native database sessions are rejected explicitly; there is no implicit conversion from the legacy SQLite/PostgreSQL-era model.
+Acquisition provenance remains separate from canonical identity, so multiple acquisition runs can reference the same object without duplicating the canonical object.
+
+## Read-only boundary
+
+The public Firepit handle opens DuckDB read-only, disables external access, exposes no connection object, and permits one `SELECT` statement at a time. On open, it verifies that the public schema contains exactly the two expected views and no base tables.
+
+This is an API boundary, not filesystem access control. A process which can directly open the DuckDB file with write permissions is outside Firepit's protection boundary; use operating-system permissions where that matters.
