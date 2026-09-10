@@ -1,100 +1,95 @@
 # Database model
 
-Firepit separates its physical storage model from the analyst-facing contract.
+Firepit stores canonical STIX 2.1 objects and acquisition provenance in private DuckDB tables. Analysts query public views only.
 
-## Public contract
+## Public view hierarchy
 
-A session schema contains views only. The two main views are modeled after Microsoft Sentinel's threat-intelligence tables:
+Firepit has three public view tiers.
+
+### Base: Sentinel-compatible contracts
 
 - `ThreatIntelIndicators`
 - `ThreatIntelObjects`
 
-Four read-only views are derived from those two main views:
+These names and columns are the compatibility foundation and are kept stable. `Data` contains the complete canonical STIX object.
 
-- `ThreatIntelObservedObjects`
-- `ThreatIntelObservationSummary`
-- `ThreatIntelValueCounts`
-- `ThreatIntelRelationships`
+### Extended: `ThreatIntel<Semantic>Ex`
 
-There are no public base tables. The Python query handle opens DuckDB read-only and does not expose the underlying DuckDB connection.
+`Ex` views provide Firepit semantics that naturally change row grain or aggregate data. They are derived only from the two base views.
 
-## Main views
+- `ThreatIntelRelationshipsEx` — one row per STIX relationship, with source and target type/name/value/pattern enrichment.
+- `ThreatIntelActorRelationsEx` — one row per threat-actor association, normalized so the actor can be either relationship source or target.
+- `ThreatIntelObservationsEx` — one row per `observed-data.object_refs` membership.
+- `ThreatIntelObservationSummaryEx` — one row per referenced object with observation-record count, represented observation count, and first/last timestamps.
+- `ThreatIntelObservablesEx` — one row per common searchable observable value or hash.
+- `ThreatIntelObservableStatsEx` — one row per observable key/value with object and observation statistics.
 
-### ThreatIntelIndicators
+This tier replaces the reusable semantics formerly implemented by Firepit's mutable query/view API: dereference joins, `timestamped`, `summary`, `number_observed`, and `value_counts`.
 
-Contains canonical STIX `indicator` objects. Frequently queried fields such as `Confidence`, `Pattern`, `Created`, `Modified`, `ValidFrom`, and `ValidUntil` are projected as columns. `Data` contains the complete canonical STIX object.
+### Wide: `W`
 
-### ThreatIntelObjects
+- `ThreatIntelIndicatorsW`
+- `ThreatIntelObjectsW`
 
-Contains every canonical non-indicator object, including SCOs, SDOs, SROs, and `observed-data`. `StixType` identifies the STIX object type and `Data` preserves the complete object.
+A `W` view preserves the one-row-per-base-record grain and appends denormalized search columns. It is intended for interactive hunting and for queries that would otherwise contain many repeated `json_extract*` expressions.
 
-These two views are the only foundation for the derived analytical views.
+`ThreatIntelIndicatorsW` includes common STIX metadata, indicator types, name/description, marking/reference fields, common equality-pattern observables, and related threat-actor lists.
 
-## Derived views
+`ThreatIntelObjectsW` includes common STIX metadata plus fields useful for relationship, threat-actor, observed-data, process, network-traffic, file, account, directory, and registry searches.
 
-### ThreatIntelObservedObjects
+## Row-grain rule
 
-Expands `observed-data.object_refs` into one row per observation/object association and joins each reference to its canonical object in `ThreatIntelObjects`.
+The suffix communicates cardinality:
 
-Important columns are:
+```text
+no suffix   compatibility/base row grain
+Ex          semantic view; row grain may expand or aggregate
+W           wide view; row grain must remain identical to its base view
+```
 
-- `ObservationId`
-- `ObjectId`
-- `StixType`
-- `FirstObserved`
-- `LastObserved`
-- `NumberObserved`
-- `Data`
-- `SourceSystem`
+This rule is important because an analyst can safely substitute `ThreatIntelIndicatorsW` for `ThreatIntelIndicators` when they want more columns without unexpectedly multiplying rows. The same applies to `ThreatIntelObjectsW`.
 
-This is the relational equivalent of the historical timestamped and observed-data attribute extraction queries.
+## Relationship model
 
-### ThreatIntelObservationSummary
+`ThreatIntelRelationshipsEx` joins relationship `source_ref` and `target_ref` against the union of the two base views. It exposes endpoint metadata without requiring the analyst to repeat the dereference joins.
 
-Groups `ThreatIntelObservedObjects` by object and exposes:
+`ThreatIntelActorRelationsEx` then normalizes actor direction. A threat actor is always represented in `ThreatActorId`/`ThreatActorName`, while the opposite endpoint is represented in `RelatedId`, `RelatedStixType`, `RelatedName`, `RelatedValue`, and `RelatedPattern`.
 
-- `ObservationRecords` — number of observation/object associations;
-- `ObservationCount` — sum of STIX `number_observed`;
-- `FirstObserved` — earliest observation timestamp;
-- `LastObserved` — latest observation timestamp.
+This directly replaces the common two-branch pattern of joining relationships once with the actor as source, once with the actor as target, and then unioning the results.
 
-This deliberately keeps record count and represented observation count separate.
+## Observation model
 
-### ThreatIntelValueCounts
+`ThreatIntelObservationsEx` expands `observed-data.object_refs`. `ThreatIntelObservationSummaryEx` aggregates that expansion:
 
-Traverses the `Data` JSON of observed objects with DuckDB `json_tree()` and aggregates scalar property values. It exposes:
+```text
+ObservationRecords = number of linked observed-data SDOs
+ObservationCount   = sum(number_observed)
+FirstObserved      = minimum first_observed
+LastObserved       = maximum last_observed
+```
 
-- `StixType`
-- `StixPath`
-- `Value`
-- `ValueType`
-- `ObservationRecords`
-- `ObservationCount`
-- `FirstObserved`
-- `LastObserved`
+These quantities remain distinct because an observation record can represent more than one occurrence.
 
-Array indexes are normalized to `[*]`, making repeated-property paths stable for grouping. Each object/observation/path/value combination contributes at most once before aggregation.
+## Observable model
 
-This view replaces the historical path-based `value_counts()` query without requiring a Python query builder or Pandas dataframe.
+`ThreatIntelObservablesEx` extracts common SCO search values such as IP addresses, domains, URLs, email addresses, MAC addresses, file names, hashes, certificate serials/hashes, account logins, registry keys, and network endpoint references.
 
-### ThreatIntelRelationships
+`ThreatIntelObservableStatsEx` groups these values and combines them with observation summaries. It is the static view replacement for the old value-count/number-observed query helpers.
 
-Selects STIX `relationship` objects from `ThreatIntelObjects`, extracts `source_ref` and `target_ref`, and resolves both endpoints against the union of `ThreatIntelIndicators` and `ThreatIntelObjects`.
+## Wide indicator pattern extraction
 
-It exposes source/target IDs and types plus common `name` and `value` properties and the complete source/target `Data` objects. This covers common historical join/dereference queries without recursive auto-dereference.
+The base Sentinel-style `ObservableKey` and `ObservableValue` fields remain unchanged. Firepit does not reintroduce a STIX pattern compiler merely to populate them.
 
-## Internal physical model
+Instead, `ThreatIntelIndicatorsW` exposes named convenience columns such as `NetworkIP`, `DomainName`, `EmailAddress`, `Url`, `FileHashType`, `FileHashValue`, `X509Certificate`, `X509Issuer`, and `X509CertificateNumber` for common equality predicates.
 
-Physical tables live under a private schema named `__firepit_<session>`. Current tables include canonical objects, acquisition runs, original bundles, and run/object associations. These table names and layouts are implementation details, not a public API.
+These use conservative regular-expression extraction. They are intentionally best effort. Complex STIX patterns remain represented by the authoritative `Pattern` and `Data` columns.
 
-Standard STIX 2.1 objects are validated on the private ingestion path using OASIS `cti-python-stix2`. Firepit does not maintain a separate handwritten STIX schema model.
+## Private storage
 
-## Canonical object semantics
+The `__firepit_<session>` schema contains implementation tables for canonical objects, acquisition runs, bundles, and run/object provenance. Their structure is private and may change independently of the public view contracts.
 
-Canonical identity is the STIX object ID. For versioned objects, a newer `modified` version replaces an older version; an older version arriving later does not overwrite the newer canonical object. Conflicting content at the same `modified` timestamp is rejected. Immutable SCO identifiers cannot be reused for different content.
-
-Acquisition provenance is tracked independently, so the same canonical object may participate in multiple runs without duplicating the public object row.
+A query-only Firepit handle verifies that the public session schema contains the expected view family and no base tables. It opens DuckDB read-only and does not expose the underlying connection.
 
 ## Schema version
 
-Firepit 3 uses private model version 7. Earlier layouts are rejected explicitly; there is no implicit conversion from legacy Firepit database models.
+Firepit 3 currently uses private model version 7. Older/pre-native database sessions are rejected explicitly; there is no implicit conversion from the legacy SQLite/PostgreSQL-era model.
