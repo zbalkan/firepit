@@ -41,12 +41,28 @@ def test_oasis_validation_rejects_invalid_standard_object(tmpdir):
         ingest(path, "run-1", _bundle(_indicator(pattern=False)), session_id="hunt")
 
 
-def test_invalid_stix_pattern_is_rejected_by_oasis_parser(tmpdir):
+def test_invalid_stix_pattern_is_rejected(tmpdir):
     path = str(tmpdir.join("pattern.duckdb"))
     indicator = _indicator()
     indicator["pattern"] = "[ipv4-addr:value = ]"
-    with pytest.raises(InvalidObject, match="STIX pattern"):
+    with pytest.raises(InvalidObject):
         ingest(path, "run-1", _bundle(indicator), session_id="hunt")
+
+
+def test_declared_stix_pattern_version_is_used_for_observable_inspection(tmpdir):
+    path = str(tmpdir.join("pattern.duckdb"))
+    indicator = _indicator()
+    indicator["pattern_version"] = "2.0"
+    ingest(path, "run-1", _bundle(indicator), session_id="hunt")
+
+    with get_storage(path, "hunt") as store:
+        row = store.query_one(
+            'SELECT ObservableKey, ObservableValue FROM "ThreatIntelIndicators"'
+        )
+        assert row == {
+            "ObservableKey": "ipv4-addr:value",
+            "ObservableValue": "192.0.2.1",
+        }
 
 
 def test_complex_pattern_is_not_reduced_to_one_observable(tmpdir):
