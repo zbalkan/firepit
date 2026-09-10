@@ -140,7 +140,7 @@ Firepit does not support STIX 2.0 embedded `observed-data.objects`.
 
 ## Database compatibility
 
-Version 3 uses the private model version 7. Older Firepit database layouts are rejected explicitly. Re-ingest STIX 2.1 source data into a new database/session rather than relying on implicit migration.
+Version 3 uses private model version 8. Canonical STIX JSON in `Data` is authoritative; the private object table retains only identity, source, and ingestion metadata needed to maintain that canonical object. Older Firepit database layouts are rejected explicitly. Re-ingest STIX 2.1 source data into a new database/session rather than relying on implicit migration.
 
 ## Documentation
 
