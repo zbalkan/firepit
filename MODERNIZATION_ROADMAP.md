@@ -28,9 +28,9 @@ __firepit_<session>
     |
     v
 public <session> schema
-    - ThreatIntelIndicators
-    - ThreatIntelObjects
-    - derived hunting views
+    - 2 Sentinel-compatible base views
+    - Firepit semantic Ex views
+    - 2 wide W views
     |
     v
 Firepit query-only API
@@ -64,19 +64,36 @@ Canonical mutable STIX objects are selected by `modified` timestamp, not arrival
 
 ### Public view contract
 
-The analyst-facing schema contains no base tables. Two Sentinel-inspired views form the stable foundation:
+The analyst-facing schema contains no base tables. Two Sentinel-inspired views form the stable compatibility foundation and remain unchanged:
 
 - `ThreatIntelIndicators`
 - `ThreatIntelObjects`
 
-Four additional views are derived only from those two main views to preserve useful historical Firepit hunting semantics without restoring the old query engine:
+Firepit then defines two derived tiers.
 
-- `ThreatIntelObservedObjects` — observed-data/object expansion and timestamp context;
-- `ThreatIntelObservationSummary` — observation record count, summed `number_observed`, and first/last timestamps;
-- `ThreatIntelValueCounts` — scalar STIX property value counts over observed objects;
-- `ThreatIntelRelationships` — relationship endpoint expansion and common dereference fields.
+#### Extended views: `ThreatIntel<Semantic>Ex`
 
-The complete canonical STIX object remains available in `Data`.
+`Ex` views provide reusable semantic transformations where changing row grain is intentional:
+
+- `ThreatIntelRelationshipsEx` — relationship source/target expansion and common endpoint enrichment;
+- `ThreatIntelActorRelationsEx` — threat-actor relationships normalized across both source and target directions;
+- `ThreatIntelObservationsEx` — `observed-data.object_refs` expansion with timestamp/count context;
+- `ThreatIntelObservationSummaryEx` — observation-record count, summed `number_observed`, and first/last timestamps per object;
+- `ThreatIntelObservablesEx` — common searchable SCO values/hashes represented as STIX paths;
+- `ThreatIntelObservableStatsEx` — object/value counts plus observation statistics.
+
+This tier preserves the useful semantics of the old Firepit `timestamped`, `summary`, `number_observed`, `value_counts`, and dereference/join helpers without restoring mutable views or a custom query language.
+
+#### Wide views: `W`
+
+- `ThreatIntelIndicatorsW`
+- `ThreatIntelObjectsW`
+
+A `W` view preserves the row grain of its base view and appends computed columns. `ThreatIntelIndicatorsW` adds common indicator metadata, equality-pattern observable fields, and related threat-actor lists. `ThreatIntelObjectsW` adds common STIX metadata and type-oriented search columns for relationships, actors, observations, processes, network traffic, files, accounts, directories, and registry keys.
+
+The `W` suffix is a Firepit convention meaning *wide*. Pattern-derived fields are best-effort conveniences for common equality predicates; the original `Pattern` and `Data` remain authoritative for complex STIX patterns.
+
+The complete canonical STIX object remains available in `Data` in all tiers where the object itself is represented.
 
 ### Query-only API
 
@@ -105,10 +122,11 @@ The final test suite is intended to cover:
 - duplicate acquisition-run rejection;
 - immutable-ID and same-version conflict detection;
 - provenance independent from canonical identity;
-- the two main Sentinel-style views plus four derived hunting views;
+- unchanged `ThreatIntelIndicators` and `ThreatIntelObjects` base contracts;
+- `Ex` relationship, actor, observation, observable, and statistics semantics;
+- `W` one-row-per-base-record wide search semantics;
 - zero public base tables;
 - complete `Data` preservation;
-- observed-data expansion, observation summaries, value counts, and relationship expansion;
 - absence of exposed DuckDB handles;
 - rejection of write SQL, multiple statements, internals, catalogs, attachments, and external file access;
 - persistence and reopen behavior;
@@ -116,4 +134,4 @@ The final test suite is intended to cover:
 
 ## End state
 
-Firepit is now a small query-only STIX 2.1 threat-intelligence interface. Acquisition and physical storage are private implementation concerns; analysts see two stable Sentinel-style main views, four derived hunting views, and a constrained read-only query API.
+Firepit is now a small query-only STIX 2.1 threat-intelligence interface. Acquisition and physical storage are private implementation concerns. Analysts see two stable Sentinel-style base views, a clearly named `Ex` semantic tier for reusable relational/aggregation logic, two `W` wide search views, and a constrained read-only query API.
