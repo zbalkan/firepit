@@ -38,7 +38,31 @@ def _data_name(store, stix_type):
 def test_oasis_validation_rejects_invalid_standard_object(tmpdir):
     path = str(tmpdir.join("ingest.duckdb"))
     with pytest.raises(InvalidObject):
-        ingest(path, "q1", _bundle(_indicator(pattern=False)), session_id="hunt")
+        ingest(path, "run-1", _bundle(_indicator(pattern=False)), session_id="hunt")
+
+
+def test_invalid_stix_pattern_is_rejected_by_oasis_parser(tmpdir):
+    path = str(tmpdir.join("pattern.duckdb"))
+    indicator = _indicator()
+    indicator["pattern"] = "[ipv4-addr:value = ]"
+    with pytest.raises(InvalidObject, match="STIX pattern"):
+        ingest(path, "run-1", _bundle(indicator), session_id="hunt")
+
+
+def test_complex_pattern_is_not_reduced_to_one_observable(tmpdir):
+    path = str(tmpdir.join("pattern.duckdb"))
+    indicator = _indicator()
+    indicator["pattern"] = (
+        "[ipv4-addr:value = '192.0.2.1' "
+        "AND ipv4-addr:value = '192.0.2.2']"
+    )
+    ingest(path, "run-1", _bundle(indicator), session_id="hunt")
+
+    with get_storage(path, "hunt") as store:
+        row = store.query_one(
+            'SELECT ObservableKey, ObservableValue FROM "ThreatIntelIndicators"'
+        )
+        assert row == {"ObservableKey": None, "ObservableValue": None}
 
 
 def test_explicit_stix_20_is_rejected(tmpdir):
@@ -50,7 +74,7 @@ def test_explicit_stix_20_is_rejected(tmpdir):
         "value": "192.0.2.1",
     }
     with pytest.raises(InvalidObject, match="2.1"):
-        ingest(path, "q1", _bundle(obj), session_id="hunt")
+        ingest(path, "run-1", _bundle(obj), session_id="hunt")
 
 
 def test_custom_object_is_preserved_in_objects_view(tmpdir):
@@ -61,7 +85,7 @@ def test_custom_object_is_preserved_in_objects_view(tmpdir):
         "id": "x-example-event--11111111-1111-4111-8111-111111111111",
         "vendor_field": {"score": 7},
     }
-    ingest(path, "q1", _bundle(obj), session_id="hunt", source="custom-feed")
+    ingest(path, "run-1", _bundle(obj), session_id="hunt", source="custom-feed")
 
     with get_storage(path, "hunt") as store:
         row = store.query_one(
@@ -73,12 +97,24 @@ def test_custom_object_is_preserved_in_objects_view(tmpdir):
         assert row["SourceSystem"] == "custom-feed"
 
 
-def test_duplicate_query_id_is_rejected(tmpdir):
+def test_duplicate_run_id_is_rejected(tmpdir):
     path = str(tmpdir.join("runs.duckdb"))
     bundle = _bundle(_indicator())
-    ingest(path, "q1", bundle, session_id="hunt")
-    with pytest.raises(InvalidObject, match="already exists"):
-        ingest(path, "q1", bundle, session_id="hunt")
+    ingest(path, "run-1", bundle, session_id="hunt")
+    with pytest.raises(InvalidObject, match="run_id"):
+        ingest(path, "run-1", bundle, session_id="hunt")
+
+
+def test_same_canonical_content_does_not_reassign_source(tmpdir):
+    path = str(tmpdir.join("sources.duckdb"))
+    bundle = _bundle(_indicator())
+    ingest(path, "run-1", bundle, session_id="hunt", source="feed-a")
+    ingest(path, "run-2", bundle, session_id="hunt", source="feed-b")
+
+    with get_storage(path, "hunt") as store:
+        assert store.query_value(
+            'SELECT SourceSystem FROM "ThreatIntelIndicators"'
+        ) == "feed-a"
 
 
 def test_newest_modified_version_is_canonical_independent_of_arrival_order(tmpdir):
@@ -120,9 +156,9 @@ def test_conflicting_same_modified_version_is_rejected(tmpdir):
     }
     second = {**first, "name": "Name B"}
 
-    ingest(path, "q1", _bundle(first), session_id="hunt")
+    ingest(path, "run-1", _bundle(first), session_id="hunt")
     with pytest.raises(InvalidObject, match="same modified timestamp"):
-        ingest(path, "q2", _bundle(second), session_id="hunt")
+        ingest(path, "run-2", _bundle(second), session_id="hunt")
 
 
 def test_immutable_sco_id_cannot_change_content(tmpdir):
@@ -136,6 +172,6 @@ def test_immutable_sco_id_cannot_change_content(tmpdir):
     }
     second = {**first, "value": "192.0.2.2"}
 
-    ingest(path, "q1", _bundle(first), session_id="hunt")
+    ingest(path, "run-1", _bundle(first), session_id="hunt")
     with pytest.raises(InvalidObject, match="immutable id"):
-        ingest(path, "q2", _bundle(second), session_id="hunt")
+        ingest(path, "run-2", _bundle(second), session_id="hunt")

@@ -142,7 +142,7 @@ def _as_json(value):
 
 
 def _seed(path):
-    ingest(path, "q1", _bundle(), session_id="hunt", source="test-feed")
+    ingest(path, "run-1", _bundle(), session_id="hunt", source="test-feed")
 
 
 def test_base_indicator_view_remains_sentinel_compatible(tmpdir):
@@ -157,8 +157,8 @@ def test_base_indicator_view_remains_sentinel_compatible(tmpdir):
         assert row["Revoked"] is False
         assert row["SourceSystem"] == "test-feed"
         assert row["Pattern"] == "[ipv4-addr:value = '192.0.2.1']"
-        assert row["ObservableKey"] is None
-        assert row["ObservableValue"] is None
+        assert row["ObservableKey"] == "ipv4-addr:value"
+        assert row["ObservableValue"] == "192.0.2.1"
         assert row["Type"] == "ThreatIntelIndicators"
         assert set(row["Tags"].split(",")) == {"test", "ip"}
 

@@ -29,7 +29,7 @@ def _indicator_bundle():
 
 
 def _seed(path):
-    ingest(path, "q1", _indicator_bundle(), session_id="hunt", source="unit-test")
+    ingest(path, "run-1", _indicator_bundle(), session_id="hunt", source="unit-test")
 
 
 def test_public_handle_exposes_query_sugar_not_duckdb(tmpdir):
@@ -109,4 +109,21 @@ def test_public_schema_rejects_base_tables(tmpdir):
         connection.close()
 
     with pytest.raises(RuntimeError, match="unexpected base tables: exposed"):
+        get_storage(path, "hunt")
+
+
+def test_public_schema_rejects_stale_view_version(tmpdir):
+    path = str(tmpdir.join("query.duckdb"))
+    _seed(path)
+
+    connection = duckdb.connect(path)
+    try:
+        connection.execute(
+            "UPDATE __firepit_hunt.metadata SET value = '0' "
+            "WHERE name = 'view_version'"
+        )
+    finally:
+        connection.close()
+
+    with pytest.raises(RuntimeError, match="view version"):
         get_storage(path, "hunt")
