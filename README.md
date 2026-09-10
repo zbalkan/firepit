@@ -1,59 +1,61 @@
 # Firepit
 
-Firepit is a query-only threat-intelligence interface backed by DuckDB and STIX 2.1.
+Firepit is a small query-only STIX 2.1 threat-intelligence layer backed by DuckDB.
 
-Version 3 deliberately separates acquisition/storage internals from the analyst surface. Physical tables and provenance live in a private DuckDB schema. The public session schema contains exactly two read-only views, modeled on Microsoft Sentinel's current threat-intelligence tables:
-
-- `ThreatIntelIndicators`
-- `ThreatIntelObjects`
-
-Users query those views through Firepit's read-only API. Firepit does not expose a DuckDB connection, cursor, arbitrary execution handle, insert/update/delete methods, or physical-table API.
+Version 3 removes the historical multi-backend and Kestrel-oriented runtime surface. Acquisition remains private, standard STIX validation is delegated to OASIS `cti-python-stix2`, and analysts query a small public view surface through Firepit's read-only API.
 
 ```text
 remote source
     |
     v
-acquisition/orchestration
+Python acquisition/orchestration
+    - credentials
     - STIX-Shifter
-    - paging / polling / retry
-    - cti-python-stix2 validation
+    - native query execution
+    - polling / paging / retry
     |
-    | STIX 2.1 bundles
+    | raw STIX 2.1 JSON
     v
-private Firepit writer
+private Firepit ingestion
+    - OASIS STIX validation
+    - canonical object/version handling
+    - acquisition provenance
     |
     v
-__firepit_<session>
-    - runs
-    - bundles
-    - canonical STIX objects
-    - run/object provenance
+internal DuckDB tables
     |
-    +-----------------------------+
-                                  |
-                     public <session> schema
-                     - ThreatIntelIndicators
-                     - ThreatIntelObjects
-                                  |
-                                  v
-                         Firepit query API
+    v
+public views
+    - ThreatIntelIndicators
+    - ThreatIntelObjects
+    - ThreatIntelObservedObjects
+    - ThreatIntelObservationSummary
+    - ThreatIntelValueCounts
+    - ThreatIntelRelationships
+    |
+    v
+Firepit query-only API
 ```
 
 ## Requirements
 
-Firepit supports CPython 3.11, 3.12, 3.13, and 3.14. Query-only installations depend only on DuckDB.
+- CPython 3.11, 3.12, 3.13, or 3.14
+- DuckDB
+
+DuckDB is the only query-time runtime dependency. The optional ingestion extra adds `cti-python-stix2`.
+
+## Installation
 
 ```bash
 python -m pip install -e .
 ```
 
-Applications which use Firepit's private acquisition integration also install the ingestion extra:
+For ingestion and tests:
 
 ```bash
-python -m pip install -e ".[ingest]"
+python -m pip install -e ".[ingest,test]"
+python -m pytest
 ```
-
-That extra provides OASIS `cti-python-stix2`, which is used as the authoritative STIX 2.1 validator for standard objects. It is not imported by the public query path.
 
 ## Querying
 
@@ -61,36 +63,40 @@ That extra provides OASIS `cti-python-stix2`, which is used as the authoritative
 from firepit import get_storage
 
 with get_storage("intel.duckdb", "hunt") as store:
-    rows = store.query(
-        """
+    rows = store.query("""
         SELECT Id, Confidence, Pattern
         FROM ThreatIntelIndicators
         WHERE Confidence >= ?
-        """,
-        (70,),
-    )
+    """, (70,))
 ```
 
-Convenience methods are available for the two public views:
+The public object does not expose a DuckDB connection or write API. Queries must be a single `SELECT`, the database is opened read-only, external access is disabled, and Firepit verifies that the public schema contains views only.
 
-```python
-indicators = store.indicators("Confidence >= ?", (70,), limit=100)
-relationships = store.objects("StixType = ?", ("relationship",))
-```
+## Public views
 
-`query()`, `query_one()`, and `query_value()` accept exactly one `SELECT` statement. DDL, DML, `PRAGMA`, `ATTACH`, multiple statements, Firepit's internal schema, and DuckDB/catalog relations are rejected. The underlying connection is opened read-only and external access is disabled.
+The two Sentinel-inspired main views are:
 
-## Public data model
+- `ThreatIntelIndicators` — STIX indicators with Sentinel-compatible convenience columns and complete STIX in `Data`;
+- `ThreatIntelObjects` — every non-indicator STIX object, including SCOs, relationships, observed-data, and threat actors.
 
-`ThreatIntelIndicators` contains STIX Indicator objects. `ThreatIntelObjects` contains all other stored STIX objects. Both expose the complete canonical STIX object in `Data` as JSON alongside Sentinel-inspired convenience columns.
+Four derived views reproduce the useful historical Firepit hunting semantics without restoring its old query engine:
 
-Azure-specific columns are present for schema familiarity but are `NULL` when Firepit has no equivalent value. `ObservableKey` and `ObservableValue` are currently nullable; Firepit does not reintroduce a local STIX-pattern compiler merely to populate them.
+- `ThreatIntelObservedObjects` — expands `observed-data.object_refs`, replacing the old timestamped/observed-data attribute queries;
+- `ThreatIntelObservationSummary` — first/last observation time, observation-record count, and summed `number_observed` per object;
+- `ThreatIntelValueCounts` — value-count and observation-count aggregation over scalar STIX properties;
+- `ThreatIntelRelationships` — relationship source/target expansion with common name/value dereferencing.
 
-## Internal storage
+All derived views are defined only in terms of `ThreatIntelIndicators` and `ThreatIntelObjects`.
 
-The physical schema is intentionally not part of the public API. It may change between model versions. Applications must not query or mutate `__firepit_<session>` directly.
+## Ingestion boundary
 
-The query API enforces this boundary, but a process with direct writable filesystem access to the DuckDB database can bypass any Python API. Use operating-system file permissions if the database file itself must be protected from modification.
+Acquisition code should use the private ingestion path indirectly from the STIX-Shifter/orchestration layer. Standard STIX 2.1 objects are validated by OASIS `cti-python-stix2`; custom objects retain their raw JSON after envelope validation.
+
+Firepit does not support STIX 2.0 embedded `observed-data.objects`.
+
+## Database compatibility
+
+Version 3 uses the private model version 7. Older Firepit database layouts are rejected explicitly. Re-ingest STIX 2.1 source data into a new database/session rather than relying on implicit migration.
 
 ## Documentation
 
