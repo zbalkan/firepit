@@ -2,6 +2,16 @@
 
 Firepit stores canonical STIX 2.1 objects and acquisition provenance in private DuckDB tables. Analysts query public views only.
 
+## JSON transformation and schema normalization
+
+`Data` is the authoritative STIX object. Firepit does not duplicate the STIX schema in Python or maintain typed copies of STIX properties in the private object table.
+
+OASIS `cti-python-stix2` validates standard objects at the ingestion boundary. DuckDB then performs analytical mapping and normalization with `json_transform` and `json_transform_strict`. A transformation parses the projected JSON fields once into a typed `STRUCT`; arrays become `LIST`, homogeneous dictionaries such as STIX hashes become `MAP`, timestamps become `TIMESTAMPTZ`, and scalar values use native DuckDB types.
+
+Known standard shapes use strict transformation where a type mismatch should be an error. Heterogeneous projections, particularly `ThreatIntelObjectsW`, use tolerant transformation because the view also contains custom STIX objects whose private fields are not known to Firepit. Missing fields become `NULL`; fields outside the selected structure remain untouched in `Data`.
+
+The private writer uses the same mechanism to normalize the small canonical version envelope (`id`, `type`, and `modified`) before version comparison. Python remains responsible for acquisition orchestration and OASIS validation, not STIX-to-relational mapping.
+
 ## Public view hierarchy
 
 Firepit has three public view tiers.
@@ -31,7 +41,7 @@ This tier replaces the reusable semantics formerly implemented by Firepit's muta
 - `ThreatIntelIndicatorsW`
 - `ThreatIntelObjectsW`
 
-A `W` view preserves the one-row-per-base-record grain and appends denormalized search columns. It is intended for interactive hunting and for queries that would otherwise contain many repeated `json_extract*` expressions.
+A `W` view preserves the one-row-per-base-record grain and appends denormalized search columns. It is intended for interactive hunting and for queries that would otherwise contain repeated JSON extraction and casting.
 
 `ThreatIntelIndicatorsW` includes common STIX metadata, indicator types, name/description, marking/reference fields, common equality-pattern observables, and related threat-actor lists.
 
@@ -51,7 +61,7 @@ This rule is important because an analyst can safely substitute `ThreatIntelIndi
 
 ## Relationship model
 
-`ThreatIntelRelationshipsEx` joins relationship `source_ref` and `target_ref` against the union of the two base views. It exposes endpoint metadata without requiring the analyst to repeat the dereference joins.
+`ThreatIntelRelationshipsEx` transforms each relationship object into a typed relationship `STRUCT`, then joins `source_ref` and `target_ref` against the union of the two base views. Endpoint name/value/pattern fields are mapped once into a small endpoint structure.
 
 `ThreatIntelActorRelationsEx` then normalizes actor direction. A threat actor is always represented in `ThreatActorId`/`ThreatActorName`, while the opposite endpoint is represented in `RelatedId`, `RelatedStixType`, `RelatedName`, `RelatedValue`, and `RelatedPattern`.
 
@@ -59,7 +69,7 @@ This directly replaces the common two-branch pattern of joining relationships on
 
 ## Observation model
 
-`ThreatIntelObservationsEx` expands `observed-data.object_refs`. `ThreatIntelObservationSummaryEx` aggregates that expansion:
+`ThreatIntelObservationsEx` transforms `observed-data` into a typed structure and expands its native `VARCHAR[]` `object_refs` with `UNNEST`. `ThreatIntelObservationSummaryEx` aggregates that expansion:
 
 ```text
 ObservationRecords = number of linked observed-data SDOs
@@ -72,7 +82,7 @@ These quantities remain distinct because an observation record can represent mor
 
 ## Observable model
 
-`ThreatIntelObservablesEx` extracts common SCO search values such as IP addresses, domains, URLs, email addresses, MAC addresses, file names, hashes, certificate serials/hashes, account logins, registry keys, and network endpoint references.
+`ThreatIntelObservablesEx` maps common SCO fields into one DuckDB structure. STIX `hashes` becomes `MAP(VARCHAR, VARCHAR)` and is expanded with `map_entries`/`UNNEST`; scalar observable values and network references use the same typed projection.
 
 `ThreatIntelObservableStatsEx` groups these values and combines them with observation summaries. It is the static view replacement for the old value-count/number-observed query helpers.
 
@@ -82,13 +92,13 @@ The base Sentinel-style `ObservableKey` and `ObservableValue` fields remain unch
 
 Instead, `ThreatIntelIndicatorsW` exposes named convenience columns such as `NetworkIP`, `DomainName`, `EmailAddress`, `Url`, `FileHashType`, `FileHashValue`, `X509Certificate`, `X509Issuer`, and `X509CertificateNumber` for common equality predicates.
 
-These use conservative regular-expression extraction. They are intentionally best effort. Complex STIX patterns remain represented by the authoritative `Pattern` and `Data` columns.
+These pattern fields still use conservative regular-expression extraction. They are intentionally best effort. Other STIX fields in the wide views are mapped through DuckDB's typed JSON transformation. Complex STIX patterns remain represented by the authoritative `Pattern` and `Data` columns.
 
 ## Private storage
 
 The `__firepit_<session>` schema contains implementation tables for canonical objects, acquisition runs, bundles, and run/object provenance. Their structure is private and may change independently of the public view contracts.
 
-Canonical object storage is intentionally narrow: `Data` is authoritative, while the private object table keeps only the object ID, STIX type, last-ingestion timestamp, source, and canonical JSON. Version comparison reads the canonical object's `modified` value from `Data` rather than maintaining another copy.
+Canonical object storage is intentionally narrow: `Data` is authoritative, while the private object table keeps only the object ID, STIX type, last-ingestion timestamp, source, and canonical JSON. Version comparison obtains `modified` through DuckDB's typed JSON transformation rather than maintaining another copy.
 
 A query-only Firepit handle verifies that the public session schema contains the expected view family and no base tables. It opens DuckDB read-only and does not expose the underlying connection.
 
