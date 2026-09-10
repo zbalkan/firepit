@@ -1,6 +1,6 @@
 # Usage
 
-Firepit exposes a query-only interface over two public threat-intelligence views. The underlying DuckDB database and physical Firepit tables are implementation details.
+Firepit exposes a query-only threat-intelligence surface backed by DuckDB. Acquisition stays above Firepit; analysts query public views only.
 
 ## Open a session
 
@@ -10,103 +10,104 @@ from firepit import get_storage
 store = get_storage("intel.duckdb", "hunt")
 ```
 
-The session name selects the public schema. That schema must contain exactly:
+A session is a public DuckDB schema containing views only. Physical tables live in a private Firepit schema and are not part of the user contract.
 
-- `ThreatIntelIndicators`
-- `ThreatIntelObjects`
+## Main views
 
-and no base tables. If the public schema has been altered out of band, Firepit refuses to open it.
-
-## Query indicators
+`ThreatIntelIndicators` and `ThreatIntelObjects` are the two Sentinel-inspired main views.
 
 ```python
-rows = store.query(
-    """
-    SELECT Id, Confidence, Pattern, ValidFrom, ValidUntil
+rows = store.query("""
+    SELECT Id, Confidence, Pattern
     FROM ThreatIntelIndicators
     WHERE Confidence >= ?
-    ORDER BY Confidence DESC
-    """,
-    (70,),
-)
+""", (70,))
 ```
 
-Rows are returned as dictionaries keyed by the selected column names.
+The complete STIX object remains available in the `Data` JSON column.
 
-For common cases:
+## Derived hunting views
 
-```python
-rows = store.indicators("Confidence >= ?", (70,), limit=100)
+The old Firepit storage API contained several fixed analytical query patterns. Version 3 exposes the useful ones as views rather than Python methods or mutable variables.
+
+### ThreatIntelObservedObjects
+
+Expands STIX 2.1 `observed-data.object_refs` and associates each referenced object with the observation timestamps and `number_observed` value.
+
+```sql
+SELECT
+    ObservationId,
+    ObjectId,
+    StixType,
+    FirstObserved,
+    LastObserved,
+    NumberObserved,
+    Data
+FROM ThreatIntelObservedObjects;
 ```
 
-## Query other STIX objects
+This replaces the historical `timestamped()` and observed-data attribute extraction patterns.
 
-```python
-actors = store.objects("StixType = ?", ("threat-actor",))
+### ThreatIntelObservationSummary
 
-relationship = store.query_one(
-    """
-    SELECT Id, Data
-    FROM ThreatIntelObjects
-    WHERE StixType = 'relationship'
-    LIMIT 1
-    """
-)
+Aggregates observation history per referenced object:
+
+```sql
+SELECT
+    ObjectId,
+    StixType,
+    ObservationRecords,
+    ObservationCount,
+    FirstObserved,
+    LastObserved
+FROM ThreatIntelObservationSummary;
 ```
 
-The full canonical STIX object is available in `Data` as JSON, so normal DuckDB JSON expressions can be used inside a permitted `SELECT`:
+`ObservationRecords` counts object/observation associations. `ObservationCount` sums STIX `number_observed`. This replaces the old `summary()` and `number_observed()` helpers while keeping the two quantities explicit.
 
-```python
-rows = store.query(
-    """
-    SELECT
-        Id,
-        json_extract_string(Data, '$.name') AS Name
-    FROM ThreatIntelObjects
-    WHERE StixType = 'threat-actor'
-    """
-)
+### ThreatIntelValueCounts
+
+Flattens scalar properties from observed SCO JSON and aggregates their observation frequency:
+
+```sql
+SELECT
+    StixPath,
+    Value,
+    ObservationRecords,
+    ObservationCount
+FROM ThreatIntelValueCounts
+WHERE StixType = 'ipv4-addr'
+ORDER BY ObservationCount DESC;
 ```
 
-## Scalar queries
+Array indexes are normalized to `[*]`, giving paths such as `file:hashes.SHA-256` or repeated-property paths with wildcard indexes. This replaces the old path-oriented `value_counts()` behavior.
 
-```python
-count = store.query_value(
-    "SELECT count(*) FROM ThreatIntelIndicators"
-)
+### ThreatIntelRelationships
+
+Expands relationship source and target references and resolves common `name` and `value` properties from the two main views:
+
+```sql
+SELECT
+    RelationshipType,
+    SourceStixType,
+    SourceName,
+    SourceValue,
+    TargetStixType,
+    TargetName,
+    TargetValue
+FROM ThreatIntelRelationships;
 ```
 
-`query_one()` returns the first row as a dictionary or `None`. `query_value()` returns the first column of the first row or `None`.
+This covers the most common historical `join()` and reference-dereference use cases without reintroducing recursive auto-dereferencing.
 
-## Query restrictions
+## Query-only boundary
 
-Firepit accepts exactly one `SELECT` statement. The public API rejects:
+The public object exposes `query()`, `query_one()`, `query_value()`, `indicators()`, and `objects()`. It does not expose a DuckDB connection, cursor, DDL/DML execution, ingestion, or deletion APIs.
 
-- `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and other DML;
-- `CREATE`, `DROP`, `ALTER`, and other DDL;
-- `PRAGMA` and `ATTACH`;
-- multiple SQL statements;
-- direct references to `__firepit_*` schemas;
-- DuckDB, `information_schema`, PostgreSQL-compatibility, and SQLite-compatibility catalog relations;
-- external file access such as `read_csv_auto()`.
-
-The DuckDB connection is not exposed by the public object.
-
-## Acquisition
-
-Acquisition is intentionally separate from the public query API. Firepit's private writer is used by acquisition/orchestration code, not by analyst-facing callers. Standard STIX 2.1 objects are validated with OASIS `cti-python-stix2`; custom object envelopes are preserved without pretending Firepit has an authoritative custom schema.
-
-Users of the query interface do not need the ingestion extra.
+Queries must contain exactly one `SELECT` statement. The database is opened read-only and external access is disabled.
 
 ## Close
 
 ```python
 store.close()
-```
-
-or use a context manager:
-
-```python
-with get_storage("intel.duckdb", "hunt") as store:
-    count = store.query_value("SELECT count(*) FROM ThreatIntelObjects")
 ```
