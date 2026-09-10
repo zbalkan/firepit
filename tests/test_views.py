@@ -60,6 +60,7 @@ def _bundle():
     ipv4_id = "ipv4-addr--44444444-4444-4444-8444-444444444444"
     observed_1 = "observed-data--55555555-5555-4555-8555-555555555555"
     observed_2 = "observed-data--66666666-6666-4666-8666-666666666666"
+    file_id = "file--77777777-7777-4777-8777-777777777777"
     return {
         "type": "bundle",
         "objects": [
@@ -102,6 +103,13 @@ def _bundle():
                 "type": "ipv4-addr",
                 "id": ipv4_id,
                 "value": "192.0.2.1",
+            },
+            {
+                "type": "file",
+                "id": file_id,
+                "name": "sample.bin",
+                "size": 42,
+                "hashes": {"SHA-256": "a" * 64},
             },
             {
                 "type": "observed-data",
@@ -165,7 +173,7 @@ def test_base_objects_view_remains_sentinel_compatible(tmpdir):
 
     with get_storage(path, "hunt") as store:
         rows = store.query('SELECT * FROM "ThreatIntelObjects" ORDER BY StixType, Id')
-        assert len(rows) == 5
+        assert len(rows) == 6
         assert list(rows[0]) == _OBJECT_COLUMNS
         assert "indicator" not in {row["StixType"] for row in rows}
         assert all(row["IsDeleted"] is False for row in rows)
@@ -225,6 +233,12 @@ def test_observable_extended_views_replace_common_value_counts(tmpdir):
         )
         assert observable["ObservableValue"] == "192.0.2.1"
 
+        file_hash = store.query_one(
+            'SELECT ObservableValue FROM "ThreatIntelObservablesEx" '
+            "WHERE ObservableKey = 'file:hashes.SHA-256'"
+        )
+        assert file_hash["ObservableValue"] == "a" * 64
+
         stats = store.query_one(
             'SELECT * FROM "ThreatIntelObservableStatsEx" '
             "WHERE ObservableKey = 'ipv4-addr:value' "
@@ -278,3 +292,9 @@ def test_wide_objects_view_exposes_relationship_and_type_specific_fields(tmpdir)
         assert actor["Name"] == "Example Actor"
         assert actor["ThreatActorTypes"] == ["crime-syndicate"]
         assert actor["Aliases"] == ["Example Group"]
+
+        file_row = store.query_one(
+            'SELECT FileName, FileSize FROM "ThreatIntelObjectsW" '
+            "WHERE StixType = 'file'"
+        )
+        assert file_row == {"FileName": "sample.bin", "FileSize": 42}
