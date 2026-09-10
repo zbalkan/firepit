@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime
 
 import duckdb
 
@@ -16,6 +15,7 @@ from firepit.views_wide import install_views
 
 _MODEL_VERSION = "8"
 _INTERNAL_PREFIX = "__firepit_"
+_OBJECT_STRUCTURE = '{"id":"VARCHAR","type":"VARCHAR","modified":"TIMESTAMPTZ"}'
 
 
 def _qident(name: str) -> str:
@@ -43,15 +43,6 @@ def _bundle_dict(bundle):
 
 def _json_text(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-
-def _modified(value, object_id):
-    if value is None:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise InvalidObject(f"invalid modified timestamp for {object_id!r}") from exc
 
 
 class _Writer:
@@ -159,69 +150,76 @@ class _Writer:
             (status, count, error, query_id),
         )
 
+    def _normalize_object(self, obj):
+        data = _json_text(obj)
+        stix = self.connection.execute(
+            f"SELECT json_transform_strict(?::JSON, '{_OBJECT_STRUCTURE}')",
+            (data,),
+        ).fetchone()[0]
+        return stix["id"], stix["type"], stix["modified"], data
+
     def _existing_object(self, object_id):
-        row = self.connection.execute(
-            f"SELECT data FROM {self._table('objects')} WHERE id = ?",
+        return self.connection.execute(
+            f"SELECT data::VARCHAR, "
+            f"(json_transform_strict(data, '{_OBJECT_STRUCTURE}')).modified "
+            f"FROM {self._table('objects')} WHERE id = ?",
             (object_id,),
         ).fetchone()
-        return None if row is None else json.loads(row[0]) if isinstance(row[0], str) else row[0]
 
     @staticmethod
-    def _canonical_action(existing, obj):
+    def _canonical_action(existing, data, modified, object_id):
         if existing is None:
             return "insert"
-        if _json_text(existing) == _json_text(obj):
+        if existing[0] == data:
             return "same"
 
-        old_modified = existing.get("modified")
-        new_modified = obj.get("modified")
-        if old_modified is None and new_modified is None:
+        old_modified = existing[1]
+        if old_modified is None and modified is None:
             raise InvalidObject(
-                f"STIX object {obj['id']!r} reused an immutable id with different content"
+                f"STIX object {object_id!r} reused an immutable id with different content"
             )
-        if old_modified is None or new_modified is None:
+        if old_modified is None or modified is None:
             raise InvalidObject(
-                f"STIX object {obj['id']!r} changed versioning semantics"
+                f"STIX object {object_id!r} changed versioning semantics"
             )
-
-        old_dt = _modified(old_modified, obj["id"])
-        new_dt = _modified(new_modified, obj["id"])
-        if new_dt < old_dt:
+        if modified < old_modified:
             return "older"
-        if new_dt == old_dt:
+        if modified == old_modified:
             raise InvalidObject(
-                f"STIX object {obj['id']!r} has conflicting content at the same modified timestamp"
+                f"STIX object {object_id!r} has conflicting content at the same modified timestamp"
             )
         return "update"
 
     def _write_object(self, obj, query_id, source):
-        action = self._canonical_action(self._existing_object(obj["id"]), obj)
+        object_id, stix_type, modified, data = self._normalize_object(obj)
+        action = self._canonical_action(
+            self._existing_object(object_id), data, modified, object_id
+        )
         table = self._table("objects")
-        data = _json_text(obj)
 
         if action == "insert":
             self.connection.execute(
                 f"INSERT INTO {table} "
                 "(id, stix_type, last_ingested_at, source, data) "
                 "VALUES (?, ?, current_timestamp, ?, ?::JSON)",
-                (obj["id"], obj["type"], source, data),
+                (object_id, stix_type, source, data),
             )
         elif action == "update":
             self.connection.execute(
                 f"UPDATE {table} SET stix_type = ?, last_ingested_at = current_timestamp, "
                 "source = ?, data = ?::JSON WHERE id = ?",
-                (obj["type"], source, data, obj["id"]),
+                (stix_type, source, data, object_id),
             )
         elif action == "same":
             self.connection.execute(
                 f"UPDATE {table} SET last_ingested_at = current_timestamp, source = ? WHERE id = ?",
-                (source, obj["id"]),
+                (source, object_id),
             )
 
         self.connection.execute(
             f"INSERT INTO {self._table('run_objects')} (query_id, object_id) "
             "VALUES (?, ?) ON CONFLICT DO NOTHING",
-            (query_id, obj["id"]),
+            (query_id, object_id),
         )
 
     def ingest(self, query_id, bundles, source=None, stix_pattern=None, native_query=None):
@@ -238,7 +236,7 @@ class _Writer:
                 self.connection.execute(
                     f"INSERT INTO {self._table('bundles')} "
                     "(bundle_id, query_id, received_at, bundle) "
-                    "VALUES (?, ?, current_timestamp, ?::JSON)",
+                    "VALUES (?, ?, current_timestamp, json(?::JSON))",
                     (str(uuid.uuid4()), query_id, _json_text(bundle)),
                 )
                 for raw_obj in objects:
