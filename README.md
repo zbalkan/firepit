@@ -18,6 +18,7 @@ Python acquisition/orchestration
     v
 private Firepit ingestion
     - OASIS STIX validation
+    - DuckDB JSON transformation
     - canonical object/version handling
     - acquisition provenance
     |
@@ -68,6 +69,12 @@ with get_storage("intel.duckdb", "hunt") as store:
 ```
 
 The public object does not expose a DuckDB connection or write API. Queries must be a single `SELECT`, the database is opened read-only, external access is disabled, and Firepit verifies that the public schema contains views only.
+
+## JSON and schema handling
+
+`Data` is the canonical STIX object. Firepit does not maintain a parallel hand-written STIX storage schema. OASIS validates standard STIX objects at ingestion, then DuckDB performs JSON mapping and type normalization with `json_transform`/`json_transform_strict` when building analyst views and the internal version envelope.
+
+Known homogeneous fields become DuckDB scalar, `LIST`, `MAP`, and `STRUCT` values. Standard shapes use strict transformation where appropriate; heterogeneous `ThreatIntelObjectsW` projections use tolerant transformation so a custom object cannot invalidate the entire view. Fields not part of a projection remain available unchanged in `Data`.
 
 ## View convention
 
@@ -140,7 +147,7 @@ Firepit does not support STIX 2.0 embedded `observed-data.objects`.
 
 ## Database compatibility
 
-Version 3 uses private model version 8. Canonical STIX JSON in `Data` is authoritative; the private object table retains only identity, source, and ingestion metadata needed to maintain that canonical object. Older Firepit database layouts are rejected explicitly. Re-ingest STIX 2.1 source data into a new database/session rather than relying on implicit migration.
+Version 3 uses the private model version 8. Older Firepit database layouts are rejected explicitly. Re-ingest STIX 2.1 source data into a new database/session rather than relying on implicit migration.
 
 ## Documentation
 
