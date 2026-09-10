@@ -1,9 +1,4 @@
-"""Read-only Firepit query surface over DuckDB.
-
-The public object deliberately exposes no DuckDB connection. User SQL is
-parsed by DuckDB and must contain exactly one SELECT statement. The underlying
-connection is also opened read-only and external access is disabled.
-"""
+"""Read-only Firepit query surface over public threat-intelligence views."""
 
 from __future__ import annotations
 
@@ -13,16 +8,9 @@ import duckdb
 
 from firepit.exceptions import InvalidQuery
 from firepit.validate import validate_name
-from firepit.views import PUBLIC_VIEWS
+from firepit.views_wide import PUBLIC_VIEWS
 
-_INTERNAL_SCHEMA_PREFIX = "__firepit_"
-_FORBIDDEN_CATALOG_TOKENS = (
-    _INTERNAL_SCHEMA_PREFIX,
-    "information_schema",
-    "duckdb_",
-    "pg_catalog",
-    "sqlite_",
-)
+_FORBIDDEN = ("__firepit_", "information_schema", "duckdb_", "pg_catalog", "sqlite_")
 
 
 def _qident(name: str) -> str:
@@ -30,7 +18,7 @@ def _qident(name: str) -> str:
 
 
 class Firepit:
-    """Query-only handle over the public threat-intelligence views."""
+    """Query-only handle over Firepit's public views."""
 
     __slots__ = ("__connection", "__session_id", "__closed")
 
@@ -43,32 +31,19 @@ class Firepit:
         if not os.path.exists(path):
             raise FileNotFoundError(path)
 
-        connection = None
+        connection = duckdb.connect(path, read_only=True)
         try:
-            connection = duckdb.connect(path, read_only=True)
             connection.execute("SET python_enable_replacements=false")
             connection.execute("SET enable_external_access=false")
-            connection.execute(
-                f"SET search_path={_qident(self.__session_id)}"
-            )
-        except Exception:
-            if connection is not None:
-                try:
-                    connection.close()
-                except duckdb.Error:
-                    pass
-            raise
-
-        self.__connection = connection
-        try:
+            connection.execute(f"SET search_path={_qident(self.__session_id)}")
+            self.__connection = connection
             self.__verify_public_surface()
         except Exception:
-            self.close()
+            connection.close()
             raise
 
     @property
     def session_id(self):
-        """Return the public Firepit schema name."""
         return self.__session_id
 
     def __verify_public_surface(self):
@@ -77,107 +52,91 @@ class Firepit:
             "WHERE table_schema = ?",
             (self.__session_id,),
         ).fetchall()
-        views = {name for name, relation_type in rows if relation_type == "VIEW"}
-        tables = {
-            name for name, relation_type in rows
-            if relation_type == "BASE TABLE"
-        }
+        views = {name for name, kind in rows if kind == "VIEW"}
+        tables = {name for name, kind in rows if kind == "BASE TABLE"}
         expected = set(PUBLIC_VIEWS)
-        if views != expected or tables:
-            missing = expected - views
-            extra = views - expected
-            details = []
-            if missing:
-                details.append("missing views: " + ", ".join(sorted(missing)))
-            if extra:
-                details.append("unexpected views: " + ", ".join(sorted(extra)))
-            if tables:
-                details.append("unexpected base tables: " + ", ".join(sorted(tables)))
-            raise RuntimeError(
-                f"Firepit session {self.__session_id!r} has an invalid public "
-                "surface: " + "; ".join(details)
-            )
+        if views == expected and not tables:
+            return
 
-    def __ensure_open(self):
-        if self.__closed:
-            raise RuntimeError("Firepit handle is closed")
+        problems = []
+        if missing := expected - views:
+            problems.append("missing views: " + ", ".join(sorted(missing)))
+        if extra := views - expected:
+            problems.append("unexpected views: " + ", ".join(sorted(extra)))
+        if tables:
+            problems.append("unexpected base tables: " + ", ".join(sorted(tables)))
+        raise RuntimeError(
+            f"Firepit session {self.__session_id!r} has an invalid public surface: "
+            + "; ".join(problems)
+        )
 
     def __validated_sql(self, sql: str):
+        self.__ensure_open()
         if not isinstance(sql, str) or not sql.strip():
             raise InvalidQuery("query must be a non-empty SQL string")
-        self.__ensure_open()
-
         try:
             statements = self.__connection.extract_statements(sql)
         except duckdb.Error as exc:
             raise InvalidQuery(str(exc)) from exc
-
         if len(statements) != 1:
             raise InvalidQuery("exactly one SQL statement is allowed")
-
         statement = statements[0]
         if statement.type != duckdb.StatementType.SELECT:
             raise InvalidQuery("only SELECT statements are allowed")
-
-        normalized = statement.query.casefold()
-        if any(token in normalized for token in _FORBIDDEN_CATALOG_TOKENS):
+        if any(token in statement.query.casefold() for token in _FORBIDDEN):
             raise InvalidQuery("only the public Firepit views are queryable")
-
         return statement.query
 
-    def __execute(self, sql, parameters):
-        query = self.__validated_sql(sql)
+    def __execute(self, sql, parameters=None):
         try:
-            return self.__connection.execute(query, parameters or ())
+            return self.__connection.execute(
+                self.__validated_sql(sql), parameters or ()
+            )
         except duckdb.Error as exc:
             raise InvalidQuery(str(exc)) from exc
 
     @staticmethod
-    def __columns(cursor):
-        return tuple(column[0] for column in (cursor.description or ()))
+    def __dict(cursor, row):
+        if row is None:
+            return None
+        return dict(zip((col[0] for col in cursor.description or ()), row))
 
     def query(self, sql, parameters=None):
-        """Execute one read-only SELECT and return rows as dictionaries."""
+        """Execute one SELECT and return all rows as dictionaries."""
         cursor = self.__execute(sql, parameters)
-        columns = self.__columns(cursor)
+        columns = tuple(col[0] for col in cursor.description or ())
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     def query_one(self, sql, parameters=None):
-        """Execute one read-only SELECT and return its first row."""
+        """Execute one SELECT and return its first row."""
         cursor = self.__execute(sql, parameters)
-        columns = self.__columns(cursor)
-        row = cursor.fetchone()
-        return dict(zip(columns, row)) if row is not None else None
+        return self.__dict(cursor, cursor.fetchone())
 
     def query_value(self, sql, parameters=None):
-        """Execute one read-only SELECT and return the first scalar value."""
-        cursor = self.__execute(sql, parameters)
-        row = cursor.fetchone()
-        return row[0] if row is not None else None
+        """Execute one SELECT and return its first scalar value."""
+        row = self.__execute(sql, parameters).fetchone()
+        return row[0] if row else None
+
+    def _view(self, name, where=None, parameters=None, limit=None):
+        sql = f'SELECT * FROM "{name}"'
+        if where:
+            sql += f" WHERE {where}"
+        if limit is not None:
+            limit = int(limit)
+            if limit < 0:
+                raise ValueError("limit must be non-negative")
+            sql += f" LIMIT {limit}"
+        return self.query(sql, parameters)
 
     def indicators(self, where=None, parameters=None, *, limit=None):
-        """Query ``ThreatIntelIndicators`` with optional filter sugar."""
-        sql = 'SELECT * FROM "ThreatIntelIndicators"'
-        if where:
-            sql += f" WHERE {where}"
-        if limit is not None:
-            limit = int(limit)
-            if limit < 0:
-                raise ValueError("limit must be non-negative")
-            sql += f" LIMIT {limit}"
-        return self.query(sql, parameters)
+        return self._view("ThreatIntelIndicators", where, parameters, limit)
 
     def objects(self, where=None, parameters=None, *, limit=None):
-        """Query ``ThreatIntelObjects`` with optional filter sugar."""
-        sql = 'SELECT * FROM "ThreatIntelObjects"'
-        if where:
-            sql += f" WHERE {where}"
-        if limit is not None:
-            limit = int(limit)
-            if limit < 0:
-                raise ValueError("limit must be non-negative")
-            sql += f" LIMIT {limit}"
-        return self.query(sql, parameters)
+        return self._view("ThreatIntelObjects", where, parameters, limit)
+
+    def __ensure_open(self):
+        if self.__closed:
+            raise RuntimeError("Firepit handle is closed")
 
     def close(self):
         if not self.__closed:
@@ -194,5 +153,4 @@ class Firepit:
 
 
 def get_storage(path, session_id=None):
-    """Open a query-only Firepit handle."""
     return Firepit(path, session_id)
