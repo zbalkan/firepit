@@ -1,3 +1,4 @@
+import duckdb
 import pytest
 
 from firepit import get_storage
@@ -95,3 +96,17 @@ def test_external_file_access_is_disabled(tmpdir):
     with get_storage(path, "hunt") as store:
         with pytest.raises(InvalidQuery):
             store.query("SELECT * FROM read_csv_auto('does-not-exist.csv')")
+
+
+def test_public_schema_rejects_base_tables(tmpdir):
+    path = str(tmpdir.join("query.duckdb"))
+    _seed(path)
+
+    connection = duckdb.connect(path)
+    try:
+        connection.execute('CREATE TABLE hunt.exposed(i INTEGER)')
+    finally:
+        connection.close()
+
+    with pytest.raises(RuntimeError, match="unexpected base tables: exposed"):
+        get_storage(path, "hunt")

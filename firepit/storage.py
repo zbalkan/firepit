@@ -13,8 +13,8 @@ import duckdb
 
 from firepit.exceptions import InvalidQuery
 from firepit.validate import validate_name
+from firepit.views import PUBLIC_VIEWS
 
-PUBLIC_VIEWS = frozenset({"ThreatIntelIndicators", "ThreatIntelObjects"})
 _INTERNAL_SCHEMA_PREFIX = "__firepit_"
 _FORBIDDEN_CATALOG_TOKENS = (
     _INTERNAL_SCHEMA_PREFIX,
@@ -73,19 +73,26 @@ class Firepit:
 
     def __verify_public_surface(self):
         rows = self.__connection.execute(
-            "SELECT view_name FROM duckdb_views() "
-            "WHERE schema_name = ? AND NOT internal",
+            "SELECT table_name, table_type FROM information_schema.tables "
+            "WHERE table_schema = ?",
             (self.__session_id,),
         ).fetchall()
-        views = {row[0] for row in rows}
-        if views != PUBLIC_VIEWS:
-            missing = PUBLIC_VIEWS - views
-            extra = views - PUBLIC_VIEWS
+        views = {name for name, relation_type in rows if relation_type == "VIEW"}
+        tables = {
+            name for name, relation_type in rows
+            if relation_type == "BASE TABLE"
+        }
+        expected = set(PUBLIC_VIEWS)
+        if views != expected or tables:
+            missing = expected - views
+            extra = views - expected
             details = []
             if missing:
-                details.append("missing " + ", ".join(sorted(missing)))
+                details.append("missing views: " + ", ".join(sorted(missing)))
             if extra:
-                details.append("unexpected " + ", ".join(sorted(extra)))
+                details.append("unexpected views: " + ", ".join(sorted(extra)))
+            if tables:
+                details.append("unexpected base tables: " + ", ".join(sorted(tables)))
             raise RuntimeError(
                 f"Firepit session {self.__session_id!r} has an invalid public "
                 "surface: " + "; ".join(details)
