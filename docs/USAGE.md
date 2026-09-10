@@ -19,58 +19,40 @@ A session is a DuckDB schema containing public views only.
 Use the Sentinel-compatible base views when portability and schema stability matter most:
 
 ```sql
-SELECT Id, Confidence, Pattern
+SELECT Id, Confidence, ObservableKey, ObservableValue, Pattern
 FROM ThreatIntelIndicators
 WHERE Confidence >= 70;
 ```
 
-The base contracts are `ThreatIntelIndicators` and `ThreatIntelObjects` and are intentionally kept unchanged.
+The base schema contracts are `ThreatIntelIndicators` and `ThreatIntelObjects`. For a STIX Indicator with exactly one unqualified equality comparison, `ObservableKey` and `ObservableValue` are populated from OASIS `stix2-patterns` inspection. Otherwise they are `NULL`, and `Pattern` remains the authoritative expression.
 
 ### Extended `Ex` views
 
 Use `ThreatIntel<Semantic>Ex` when the query would otherwise require repeated relationship traversal, observation expansion, or aggregation.
 
-Threat actors related to any intelligence object:
-
 ```sql
-SELECT
-    ThreatActorName,
-    RelationshipType,
-    RelatedStixType,
-    RelatedName,
-    RelatedValue,
-    RelatedPattern
+SELECT ThreatActorName, RelationshipType, RelatedStixType,
+       RelatedName, RelatedValue, RelatedPattern
 FROM ThreatIntelActorRelationsEx
 WHERE ThreatActorName = 'Sangria Tempest';
 ```
 
-The view already normalizes both relationship directions. There is no need to build separate source/target branches and `UNION` them.
+The view normalizes both relationship directions; separate source/target branches and a `UNION` are unnecessary.
 
-Observation history for an object:
+Observation history:
 
 ```sql
-SELECT
-    ObjectId,
-    StixType,
-    ObservationRecords,
-    ObservationCount,
-    FirstObserved,
-    LastObserved
+SELECT ObjectId, StixType, ObservationRecords, ObservationCount,
+       FirstObserved, LastObserved
 FROM ThreatIntelObservationSummaryEx
 WHERE ObjectId = ?;
 ```
 
-Common observable/value counts:
+Observable statistics:
 
 ```sql
-SELECT
-    ObservableKey,
-    ObservableValue,
-    ObjectCount,
-    ObservationRecords,
-    ObservationCount,
-    FirstObserved,
-    LastObserved
+SELECT ObservableKey, ObservableValue, ObjectCount,
+       ObservationRecords, ObservationCount, FirstObserved, LastObserved
 FROM ThreatIntelObservableStatsEx
 WHERE ObservableValue = '192.0.2.1';
 ```
@@ -79,48 +61,42 @@ WHERE ObservableValue = '192.0.2.1';
 
 ### Wide `W` views
 
-Use the `W` views for interactive search and hunting when repeatedly extracting fields from `Data` would add noise.
+Use the W views for interactive hunting when repeated projection from `Data` or relationship correlation would add noise.
 
 ```sql
-SELECT
-    NetworkIP,
-    DomainName,
-    FileHashType,
-    FileHashValue,
-    ThreatActorNames,
-    Confidence,
-    Pattern
+SELECT NetworkIP, DomainName, FileHashType, FileHashValue,
+       ThreatActorNames, Confidence, Pattern
 FROM ThreatIntelIndicatorsW
 WHERE NetworkIP = '192.0.2.1';
 ```
 
-The equivalent actor correlation in raw Sentinel-style queries requires relationship extraction, source/target joins, and a union. `ThreatIntelIndicatorsW` precomputes the common actor linkage.
-
 For general STIX objects:
 
 ```sql
-SELECT
-    StixType,
-    Name,
-    Value,
-    RelationshipType,
-    SourceName,
-    TargetName,
-    Pid,
-    CommandLine,
-    SrcPort,
-    DstPort
+SELECT StixType, Name, Value, RelationshipType,
+       SourceName, TargetName, Pid, CommandLine, SrcPort, DstPort
 FROM ThreatIntelObjectsW
 WHERE StixType IN ('relationship', 'process', 'network-traffic');
 ```
 
-The `W` views preserve one output row per base-view row. They add search columns but do not explode arrays or relationships.
+W views preserve one output row per base-view row. They add nullable search columns but do not explode arrays or relationships.
 
-## Pattern-derived wide columns
+## Indicator observables
 
-`ThreatIntelIndicatorsW` extracts common equality-pattern values for IPv4, IPv6, domain, email, URL, network source/destination IP, file hashes, and X.509 fields. These columns are convenience projections, not a replacement STIX pattern engine.
+Firepit does not use regular expressions as a partial STIX-pattern parser. During ingestion, the OASIS STIX 2.1 pattern parser inspects the pattern. Firepit exposes a convenience observable only when the pattern contains one unqualified equality comparison, for example:
 
-Complex patterns using boolean combinations, `IN`, comparison operators, qualifiers, or unsupported object paths must still be evaluated from the original `Pattern` value. The raw STIX `Data` and `Pattern` remain authoritative.
+```text
+[ipv4-addr:value = '192.0.2.1']
+```
+
+which yields:
+
+```text
+ObservableKey   = ipv4-addr:value
+ObservableValue = 192.0.2.1
+```
+
+Compound expressions, qualifiers, non-equality operators, or patterns which cannot be represented by one key/value pair leave the convenience fields `NULL`. The original `Pattern` and `Data` are retained unchanged.
 
 ## Read-only contract
 
@@ -133,7 +109,11 @@ rows = store.query(
 )
 ```
 
-Convenience methods `indicators()` and `objects()` continue to target the two base views.
+Convenience methods `indicators()` and `objects()` target the two base views.
+
+## Acquisition runs
+
+The private writer identifies each acquisition execution by `run_id`. This is provenance for one execution, not the identity of a reusable query. The original STIX pattern and native query can be recorded as run metadata when the orchestration layer has them.
 
 ## Close
 

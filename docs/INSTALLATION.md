@@ -12,13 +12,13 @@ python -m pip install -e .
 
 ## Acquisition integration
 
-Applications which use Firepit's private ingestion path install the optional ingestion extra:
+Applications using Firepit's private ingestion path install the optional ingestion extra:
 
 ```bash
 python -m pip install -e ".[ingest]"
 ```
 
-This adds OASIS `cti-python-stix2`, which validates standard STIX 2.1 objects before they enter the private canonical object store. The public query path does not import `stix2`.
+This adds OASIS `cti-python-stix2` for standard STIX 2.1 object handling and `stix2-patterns` for authoritative STIX 2.1 Indicator pattern inspection. The public query path imports neither dependency.
 
 ## Development install
 
@@ -27,9 +27,9 @@ python -m pip install -e ".[test]"
 python -m pytest
 ```
 
-The test extra includes the ingestion dependency because the suite covers both the private acquisition boundary and the public query contract.
+The test extra includes the ingestion dependencies because the suite covers both the private acquisition boundary and the public query contract.
 
-CI covers Python 3.11 through 3.14 on Linux, macOS, and Windows.
+CI is configured for Python 3.11 through 3.14 on Linux, macOS, and Windows.
 
 ## Build a distribution
 
@@ -42,4 +42,4 @@ Package metadata and dependencies are defined in `pyproject.toml`. The repositor
 
 ## Database compatibility
 
-The current private storage model is version 7. Earlier Firepit database layouts are not migrated implicitly. Re-ingest source STIX 2.1 into a new database/session when crossing an incompatible model boundary.
+The current private storage model is version 9 and public view definitions are versioned separately. Earlier Firepit database layouts are not migrated implicitly. Re-ingest source STIX 2.1 into a new database/session when crossing an incompatible model boundary.

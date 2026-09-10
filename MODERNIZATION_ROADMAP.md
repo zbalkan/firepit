@@ -4,7 +4,7 @@
 
 The modernization is complete on `claude/firepit-duckdb-modernize-9tj618`.
 
-Firepit no longer exposes the historical multi-backend/Kestrel storage surface. The final design is a query-only threat-intelligence interface backed by DuckDB, with STIX 2.1 acquisition and physical storage kept private.
+Firepit 3 is a query-only threat-intelligence interface backed by DuckDB. Acquisition/orchestration and physical storage are private; analysts query a stable view family.
 
 ```text
 remote source
@@ -13,18 +13,22 @@ remote source
 acquisition/orchestration
     - STIX-Shifter
     - paging / polling / retry
-    - OASIS cti-python-stix2 validation
     |
     | STIX 2.1 bundles
     v
 private Firepit writer
+    - OASIS object validation
+    - OASIS pattern inspection for safe key/value observables
+    - DuckDB JSON transformation
+    - canonical version selection
+    - acquisition-run provenance
     |
     v
 __firepit_<session>
-    - canonical objects
-    - raw bundles
+    - metadata
     - runs
-    - run/object provenance
+    - raw bundles
+    - canonical objects
     |
     v
 public <session> schema
@@ -38,62 +42,57 @@ Firepit query-only API
 
 ## Completed reductions
 
-### Execution and backend reduction
+### Backend and execution surface
 
-Removed SQLite, PostgreSQL, backend dialect machinery, async wrappers, Pandas/dataframe ingestion, HTTP acquisition, `splint`, `woodchipper`, and the Firepit CLI. DuckDB is the only database engine.
+Removed SQLite, PostgreSQL, dialect machinery, asynchronous storage wrappers, Pandas/dataframe native-result translation, HTTP acquisition, `splint`, `woodchipper`, and the Firepit CLI. DuckDB is the only database engine.
 
-### Kestrel compatibility removal
+### Kestrel compatibility
 
 Removed symtable/appdata state, mutable hunt variables, compatibility query metadata, relationship emulation tables, recursive dereferencing, and the generic relational query AST.
 
-### Query-language reduction
+### Query-language ownership
 
-Removed local STIX-pattern compilation and its Lark grammar. Remote STIX-pattern translation belongs to STIX-Shifter; Firepit's public surface accepts read-only SQL only.
+Removed Firepit's STIX-pattern-to-SQL compiler and Lark grammar. Remote source translation belongs to STIX-Shifter; public Firepit analysis uses SQL.
+
+Firepit does inspect Indicator patterns for the narrower purpose of populating existing Sentinel-style `ObservableKey`/`ObservableValue` columns. This uses the OASIS STIX 2.1 pattern parser, not a Firepit grammar or regex approximation, and only one unqualified equality comparison is reduced to a key/value pair.
 
 ### STIX 2.1 boundary
 
-Removed STIX 2.0 embedded `observed-data.objects` support and Python-side compatibility transformation. Standard STIX 2.1 validation is now delegated to OASIS `cti-python-stix2` in the optional private ingestion path.
-
-The intermediate handwritten `stixschema.py` was removed after it proved the storage direction; Firepit no longer maintains a parallel copy of the OASIS object schema.
+Removed STIX 2.0 embedded `observed-data.objects` compatibility and Firepit-generated SCO identifiers. Standard STIX 2.1 object acceptance is delegated to OASIS `cti-python-stix2`; Firepit retains only local policy checks such as the 2.1 boundary and rejection of embedded observed-data objects.
 
 ### Private physical storage
 
-The final physical model uses a private `__firepit_<session>` schema for acquisition provenance and canonical STIX objects. The physical layout is not a public compatibility contract.
+Private model version 9 contains metadata, acquisition runs, raw bundles, and canonical objects. The previous `run_objects` membership table was removed because raw bundles already preserve membership and no operation consumed the duplicate relation.
 
-Canonical mutable STIX objects are selected by `modified` timestamp, not arrival order. Conflicting content at the same version and immutable-ID reuse are rejected.
+`query_id` terminology was replaced with `run_id`: the stored entity represents one acquisition execution, while a source query may be reused across executions.
+
+Canonical versioned STIX objects are selected by `modified`, not arrival order. Conflicting content at the same `id`/`modified` version is rejected rather than resolving an undefined conflict by arrival order.
+
+`SourceSystem` identifies the source associated with the canonical payload/version. Receiving byte-equivalent canonical content from another source does not reassign this value solely because it arrived later. Acquisition evidence remains in the private run and raw-bundle records.
+
+### DuckDB-native JSON mapping
+
+Complete STIX remains available as canonical `Data` JSON. DuckDB performs selected schema mapping with `json_transform`/`json_transform_strict`; analytical projections use native scalar, `STRUCT`, `LIST`, and `MAP` types without maintaining a complete handwritten STIX schema in Firepit.
 
 ### Public view contract
 
-The analyst-facing schema contains no base tables. Two Sentinel-inspired views form the stable compatibility foundation and remain unchanged:
+The analyst-facing schema contains views only. Two Sentinel-inspired views provide the stable base schema contracts:
 
 - `ThreatIntelIndicators`
 - `ThreatIntelObjects`
 
-Firepit then defines two derived tiers.
+Derived tiers are:
 
-#### Extended views: `ThreatIntel<Semantic>Ex`
+- `ThreatIntel<Semantic>Ex` for reusable relational/expansion/aggregation semantics;
+- `ThreatIntelIndicatorsW` and `ThreatIntelObjectsW` for wide one-row-per-base-record hunting projections.
 
-`Ex` views provide reusable semantic transformations where changing row grain is intentional:
+The Ex tier retains useful semantics formerly provided by `timestamped`, `summary`, `number_observed`, `value_counts`, and dereference helpers without rebuilding a Python query language.
 
-- `ThreatIntelRelationshipsEx` — relationship source/target expansion and common endpoint enrichment;
-- `ThreatIntelActorRelationsEx` — threat-actor relationships normalized across both source and target directions;
-- `ThreatIntelObservationsEx` — `observed-data.object_refs` expansion with timestamp/count context;
-- `ThreatIntelObservationSummaryEx` — observation-record count, summed `number_observed`, and first/last timestamps per object;
-- `ThreatIntelObservablesEx` — common searchable SCO values/hashes represented as STIX paths;
-- `ThreatIntelObservableStatsEx` — object/value counts plus observation statistics.
+### View lifecycle
 
-This tier preserves the useful semantics of the old Firepit `timestamped`, `summary`, `number_observed`, `value_counts`, and dereference/join helpers without restoring mutable views or a custom query language.
+Public view definitions have an independent `view_version`. Writers install/recreate the view family only when this version is missing or changes. Query handles require the expected view version as well as the expected names and zero public base tables.
 
-#### Wide views: `W`
-
-- `ThreatIntelIndicatorsW`
-- `ThreatIntelObjectsW`
-
-A `W` view preserves the row grain of its base view and appends computed columns. `ThreatIntelIndicatorsW` adds common indicator metadata, equality-pattern observable fields, and related threat-actor lists. `ThreatIntelObjectsW` adds common STIX metadata and type-oriented search columns for relationships, actors, observations, processes, network traffic, files, accounts, directories, and registry keys.
-
-The `W` suffix is a Firepit convention meaning *wide*. Pattern-derived fields are best-effort conveniences for common equality predicates; the original `Pattern` and `Data` remain authoritative for complex STIX patterns.
-
-The complete canonical STIX object remains available in `Data` in all tiers where the object itself is represented.
+This separates physical-model compatibility from logical-view compatibility and avoids unconditional DDL during ordinary ingestion.
 
 ### Query-only API
 
@@ -104,34 +103,29 @@ The public `Firepit` handle:
 - rejects DDL, DML, `PRAGMA`, `ATTACH`, multiple statements, internal schemas, and catalog relations;
 - opens DuckDB read-only;
 - disables external access;
-- verifies that the public schema contains exactly the expected public views and zero base tables.
+- verifies the supported public view contract before accepting queries.
 
-### Packaging and repository cleanup
+These controls enforce different parts of the API boundary; they are not presented as filesystem isolation for the DuckDB file.
 
-Packaging is defined in `pyproject.toml`. Query-only installations depend only on `duckdb`; `stix2` is an optional ingestion dependency. Python 3.11 through 3.14 are supported.
+### Repository cleanup
 
-Removed legacy `setup.py`, `setup.cfg`, requirements files, tox, project Makefile, Pylint configuration, Sphinx/RST documentation, and obsolete migration-era fixtures.
+Packaging is defined in `pyproject.toml`. Query-only installations depend only on `duckdb`; OASIS STIX libraries are ingestion extras. Python 3.11 through 3.14 are supported.
+
+Legacy setup files, requirements files, tox, Makefiles, Pylint configuration, Sphinx/RST documentation, and obsolete migration-era fixtures were removed.
+
+## Deliberately not added
+
+Several possible changes were reviewed and intentionally not included:
+
+- No second materialized normalized-object representation was added. The Ex and W contracts are required to derive from the two base views, and a duplicate hidden representation would add storage/schema ownership without a demonstrated need.
+- No set-based staging/MERGE subsystem was added. Row-at-a-time ingestion may become an optimization target if measurement shows it matters, but additional staging machinery is not justified solely by architectural preference.
+- `cti-stix-validator` was not made the ingestion authority for this release. It is useful validation tooling but is explicitly non-normative and brings a broader dependency/checking surface; the existing `cti-python-stix2` object boundary plus OASIS pattern parser satisfies the current responsibilities with less change.
+- SCO content-collision handling remains conservative. A principled merge policy for same-ID SCOs would require explicit rules for non-ID-contributing properties; Firepit does not silently invent such a merge.
 
 ## Acceptance boundary
 
-The final test suite is intended to cover:
-
-- OASIS validation for standard STIX 2.1 objects;
-- custom-object preservation;
-- canonical version ordering;
-- duplicate acquisition-run rejection;
-- immutable-ID and same-version conflict detection;
-- provenance independent from canonical identity;
-- unchanged `ThreatIntelIndicators` and `ThreatIntelObjects` base contracts;
-- `Ex` relationship, actor, observation, observable, and statistics semantics;
-- `W` one-row-per-base-record wide search semantics;
-- zero public base tables;
-- complete `Data` preservation;
-- absence of exposed DuckDB handles;
-- rejection of write SQL, multiple statements, internals, catalogs, attachments, and external file access;
-- persistence and reopen behavior;
-- CI on CPython 3.11, 3.12, 3.13, and 3.14 across Linux, macOS, and Windows.
+The test suite is intended to cover OASIS STIX 2.1 acceptance, custom-object preservation, canonical version ordering, same-version conflict handling, acquisition-run identity, safe Indicator observable extraction, complex-pattern non-reduction, canonical source behavior, base/Ex/W view semantics, view-version validation, complete `Data` preservation, and the query-only boundary across supported Python/platform combinations.
 
 ## End state
 
-Firepit is now a small query-only STIX 2.1 threat-intelligence interface. Acquisition and physical storage are private implementation concerns. Analysts see two stable Sentinel-style base views, a clearly named `Ex` semantic tier for reusable relational/aggregation logic, two `W` wide search views, and a constrained read-only query API.
+Firepit is a small STIX 2.1 analytical layer rather than a general storage framework or query-language implementation. STIX-Shifter owns source translation, OASIS tooling owns STIX object/pattern semantics, DuckDB owns storage/transformation/query execution, and Firepit owns the canonicalization policy plus the analyst-facing threat-intelligence view contract.
