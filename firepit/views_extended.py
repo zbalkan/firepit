@@ -11,6 +11,25 @@ EXTENDED_VIEWS = (
     "ThreatIntelObservableStatsEx",
 )
 
+_RELATIONSHIP_STRUCTURE = (
+    '{"relationship_type":"VARCHAR","source_ref":"VARCHAR",'
+    '"target_ref":"VARCHAR","description":"VARCHAR",'
+    '"created":"TIMESTAMPTZ","modified":"TIMESTAMPTZ",'
+    '"start_time":"TIMESTAMPTZ","stop_time":"TIMESTAMPTZ",'
+    '"revoked":"BOOLEAN"}'
+)
+_ENDPOINT_STRUCTURE = '{"name":"VARCHAR","value":"VARCHAR","pattern":"VARCHAR"}'
+_OBSERVATION_STRUCTURE = (
+    '{"object_refs":["VARCHAR"],"first_observed":"TIMESTAMPTZ",'
+    '"last_observed":"TIMESTAMPTZ","number_observed":"UBIGINT"}'
+)
+_OBSERVABLE_STRUCTURE = (
+    '{"value":"VARCHAR","number":"VARCHAR","path":"VARCHAR",'
+    '"account_login":"VARCHAR","key":"VARCHAR","serial_number":"VARCHAR",'
+    '"name":"VARCHAR","hashes":"MAP(VARCHAR, VARCHAR)",'
+    '"src_ref":"VARCHAR","dst_ref":"VARCHAR"}'
+)
+
 
 def all_objects_cte(public_schema: str) -> str:
     indicators = qname(public_schema, "ThreatIntelIndicators")
@@ -32,33 +51,43 @@ def install_extended_views(connection, public_schema: str):
 
     relationships = qname(public_schema, "ThreatIntelRelationshipsEx")
     create_view(connection, public_schema, "ThreatIntelRelationshipsEx", f"""
-        WITH {all_objects}
+        WITH {all_objects},
+        relationships AS (
+            SELECT r.*,
+                   json_transform_strict(r.Data, '{_RELATIONSHIP_STRUCTURE}') AS stix
+            FROM {objects} r
+            WHERE r.StixType = 'relationship'
+        ),
+        endpoints AS (
+            SELECT o.*,
+                   json_transform(o.Data, '{_ENDPOINT_STRUCTURE}') AS stix
+            FROM all_objects o
+        )
         SELECT
             r.Id AS RelationshipId,
-            json_extract_string(r.Data, '$.relationship_type') AS RelationshipType,
-            json_extract_string(r.Data, '$.source_ref') AS SourceRef,
+            r.stix.relationship_type AS RelationshipType,
+            r.stix.source_ref AS SourceRef,
             s.StixType AS SourceStixType,
-            COALESCE(json_extract_string(s.Data, '$.name'), json_extract_string(s.Data, '$.value')) AS SourceName,
-            json_extract_string(s.Data, '$.value') AS SourceValue,
-            CASE WHEN s.StixType = 'indicator' THEN json_extract_string(s.Data, '$.pattern') END AS SourcePattern,
+            COALESCE(s.stix.name, s.stix.value) AS SourceName,
+            s.stix.value AS SourceValue,
+            CASE WHEN s.StixType = 'indicator' THEN s.stix.pattern END AS SourcePattern,
             s.Data AS SourceData,
-            json_extract_string(r.Data, '$.target_ref') AS TargetRef,
+            r.stix.target_ref AS TargetRef,
             t.StixType AS TargetStixType,
-            COALESCE(json_extract_string(t.Data, '$.name'), json_extract_string(t.Data, '$.value')) AS TargetName,
-            json_extract_string(t.Data, '$.value') AS TargetValue,
-            CASE WHEN t.StixType = 'indicator' THEN json_extract_string(t.Data, '$.pattern') END AS TargetPattern,
+            COALESCE(t.stix.name, t.stix.value) AS TargetName,
+            t.stix.value AS TargetValue,
+            CASE WHEN t.StixType = 'indicator' THEN t.stix.pattern END AS TargetPattern,
             t.Data AS TargetData,
-            json_extract_string(r.Data, '$.description') AS Description,
-            TRY_CAST(json_extract_string(r.Data, '$.created') AS TIMESTAMPTZ) AS Created,
-            TRY_CAST(json_extract_string(r.Data, '$.modified') AS TIMESTAMPTZ) AS Modified,
-            TRY_CAST(json_extract_string(r.Data, '$.start_time') AS TIMESTAMPTZ) AS StartTime,
-            TRY_CAST(json_extract_string(r.Data, '$.stop_time') AS TIMESTAMPTZ) AS StopTime,
-            COALESCE(TRY_CAST(json_extract(r.Data, '$.revoked') AS BOOLEAN), FALSE) AS Revoked,
+            r.stix.description AS Description,
+            r.stix.created AS Created,
+            r.stix.modified AS Modified,
+            r.stix.start_time AS StartTime,
+            r.stix.stop_time AS StopTime,
+            COALESCE(r.stix.revoked, FALSE) AS Revoked,
             r.SourceSystem, r.TimeGenerated, r.Data
-        FROM {objects} r
-        LEFT JOIN all_objects s ON s.Id = json_extract_string(r.Data, '$.source_ref')
-        LEFT JOIN all_objects t ON t.Id = json_extract_string(r.Data, '$.target_ref')
-        WHERE r.StixType = 'relationship'
+        FROM relationships r
+        LEFT JOIN endpoints s ON s.Id = r.stix.source_ref
+        LEFT JOIN endpoints t ON t.Id = r.stix.target_ref
     """)
 
     create_view(connection, public_schema, "ThreatIntelActorRelationsEx", f"""
@@ -85,22 +114,32 @@ def install_extended_views(connection, public_schema: str):
 
     observations = qname(public_schema, "ThreatIntelObservationsEx")
     create_view(connection, public_schema, "ThreatIntelObservationsEx", f"""
-        WITH {all_objects}
+        WITH {all_objects},
+        observed AS (
+            SELECT o.*,
+                   json_transform_strict(o.Data, '{_OBSERVATION_STRUCTURE}') AS stix
+            FROM {objects} o
+            WHERE o.StixType = 'observed-data'
+        ),
+        endpoints AS (
+            SELECT o.*,
+                   json_transform(o.Data, '{_ENDPOINT_STRUCTURE}') AS stix
+            FROM all_objects o
+        )
         SELECT
             o.Id AS ObservationId,
-            json_extract_string(ref.value, '$') AS ObjectId,
+            ref.ObjectId,
             target.StixType,
-            TRY_CAST(json_extract_string(o.Data, '$.first_observed') AS TIMESTAMPTZ) AS FirstObserved,
-            TRY_CAST(json_extract_string(o.Data, '$.last_observed') AS TIMESTAMPTZ) AS LastObserved,
-            TRY_CAST(json_extract(o.Data, '$.number_observed') AS UBIGINT) AS NumberObserved,
-            COALESCE(json_extract_string(target.Data, '$.name'), json_extract_string(target.Data, '$.value')) AS ObjectName,
-            json_extract_string(target.Data, '$.value') AS ObservableValue,
+            o.stix.first_observed AS FirstObserved,
+            o.stix.last_observed AS LastObserved,
+            o.stix.number_observed AS NumberObserved,
+            COALESCE(target.stix.name, target.stix.value) AS ObjectName,
+            target.stix.value AS ObservableValue,
             target.Data AS ObjectData,
             o.SourceSystem, o.TimeGenerated, o.Data AS ObservationData
-        FROM {objects} o
-        CROSS JOIN json_each(o.Data, '$.object_refs') ref
-        LEFT JOIN all_objects target ON target.Id = json_extract_string(ref.value, '$')
-        WHERE o.StixType = 'observed-data'
+        FROM observed o
+        CROSS JOIN UNNEST(o.stix.object_refs) AS ref(ObjectId)
+        LEFT JOIN endpoints target ON target.Id = ref.ObjectId
     """)
 
     summary = qname(public_schema, "ThreatIntelObservationSummaryEx")
@@ -122,6 +161,11 @@ def install_extended_views(connection, public_schema: str):
     observables = qname(public_schema, "ThreatIntelObservablesEx")
     create_view(connection, public_schema, "ThreatIntelObservablesEx", f"""
         WITH {all_objects},
+        typed AS (
+            SELECT o.*,
+                   json_transform(o.Data, '{_OBSERVABLE_STRUCTURE}') AS stix
+            FROM all_objects o
+        ),
         simple AS (
             SELECT
                 Id AS ObjectId,
@@ -143,39 +187,38 @@ def install_extended_views(connection, public_schema: str):
                     WHEN 'x509-certificate' THEN 'x509-certificate:serial_number'
                 END AS ObservableKey,
                 CASE StixType
-                    WHEN 'autonomous-system' THEN json_extract_string(Data, '$.number')
-                    WHEN 'directory' THEN json_extract_string(Data, '$.path')
-                    WHEN 'user-account' THEN json_extract_string(Data, '$.account_login')
-                    WHEN 'windows-registry-key' THEN json_extract_string(Data, '$.key')
-                    WHEN 'x509-certificate' THEN json_extract_string(Data, '$.serial_number')
-                    WHEN 'file' THEN json_extract_string(Data, '$.name')
-                    WHEN 'mutex' THEN json_extract_string(Data, '$.name')
-                    WHEN 'software' THEN json_extract_string(Data, '$.name')
-                    ELSE json_extract_string(Data, '$.value')
+                    WHEN 'autonomous-system' THEN stix.number
+                    WHEN 'directory' THEN stix.path
+                    WHEN 'user-account' THEN stix.account_login
+                    WHEN 'windows-registry-key' THEN stix.key
+                    WHEN 'x509-certificate' THEN stix.serial_number
+                    WHEN 'file' THEN stix.name
+                    WHEN 'mutex' THEN stix.name
+                    WHEN 'software' THEN stix.name
+                    ELSE stix.value
                 END AS ObservableValue,
                 Data, SourceSystem, TimeGenerated
-            FROM all_objects
+            FROM typed
         )
         SELECT ObjectId, StixType, ObservableKey, ObservableValue, Data, SourceSystem, TimeGenerated
         FROM simple
         WHERE ObservableKey IS NOT NULL AND ObservableValue IS NOT NULL
         UNION ALL
-        SELECT o.Id, o.StixType, o.StixType || ':hashes.' || h.key,
-               json_extract_string(h.value, '$'), o.Data, o.SourceSystem, o.TimeGenerated
-        FROM all_objects o
-        CROSS JOIN json_each(o.Data, '$.hashes') h
+        SELECT o.Id, o.StixType, o.StixType || ':hashes.' || h.entry.key,
+               h.entry.value, o.Data, o.SourceSystem, o.TimeGenerated
+        FROM typed o
+        CROSS JOIN UNNEST(map_entries(o.stix.hashes)) AS h(entry)
         WHERE o.StixType IN ('file', 'x509-certificate')
-          AND json_extract_string(h.value, '$') IS NOT NULL
         UNION ALL
         SELECT Id, StixType, 'network-traffic:src_ref',
-               json_extract_string(Data, '$.src_ref'), Data, SourceSystem, TimeGenerated
-        FROM all_objects
-        WHERE StixType = 'network-traffic' AND json_extract_string(Data, '$.src_ref') IS NOT NULL
+               stix.src_ref, Data, SourceSystem, TimeGenerated
+        FROM typed
+        WHERE StixType = 'network-traffic' AND stix.src_ref IS NOT NULL
         UNION ALL
         SELECT Id, StixType, 'network-traffic:dst_ref',
-               json_extract_string(Data, '$.dst_ref'), Data, SourceSystem, TimeGenerated
-        FROM all_objects
-        WHERE StixType = 'network-traffic' AND json_extract_string(Data, '$.dst_ref') IS NOT NULL
+               stix.dst_ref, Data, SourceSystem, TimeGenerated
+        FROM typed
+        WHERE StixType = 'network-traffic' AND stix.dst_ref IS NOT NULL
     """)
 
     create_view(connection, public_schema, "ThreatIntelObservableStatsEx", f"""
