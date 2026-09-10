@@ -8,9 +8,10 @@ import duckdb
 
 from firepit.exceptions import InvalidQuery
 from firepit.validate import validate_name
-from firepit.views_wide import PUBLIC_VIEWS
+from firepit.views_wide import PUBLIC_VIEWS, VIEW_VERSION
 
 _FORBIDDEN = ("__firepit_", "information_schema", "duckdb_", "pg_catalog", "sqlite_")
+_INTERNAL_PREFIX = "__firepit_"
 
 
 def _qident(name: str) -> str:
@@ -55,20 +56,33 @@ class Firepit:
         views = {name for name, kind in rows if kind == "VIEW"}
         tables = {name for name, kind in rows if kind == "BASE TABLE"}
         expected = set(PUBLIC_VIEWS)
-        if views == expected and not tables:
-            return
-
         problems = []
+
         if missing := expected - views:
             problems.append("missing views: " + ", ".join(sorted(missing)))
         if extra := views - expected:
             problems.append("unexpected views: " + ", ".join(sorted(extra)))
         if tables:
             problems.append("unexpected base tables: " + ", ".join(sorted(tables)))
-        raise RuntimeError(
-            f"Firepit session {self.__session_id!r} has an invalid public surface: "
-            + "; ".join(problems)
+
+        metadata = (
+            f'{_qident(_INTERNAL_PREFIX + self.__session_id)}.'
+            f'{_qident("metadata")}'
         )
+        try:
+            row = self.__connection.execute(
+                f"SELECT value FROM {metadata} WHERE name = 'view_version'"
+            ).fetchone()
+        except duckdb.Error:
+            row = None
+        if row is None or row[0] != VIEW_VERSION:
+            problems.append("unsupported or missing public view version")
+
+        if problems:
+            raise RuntimeError(
+                f"Firepit session {self.__session_id!r} has an invalid public surface: "
+                + "; ".join(problems)
+            )
 
     def __validated_sql(self, sql: str):
         self.__ensure_open()

@@ -28,11 +28,15 @@ classifiers = [
 dependencies = ["duckdb"]
 
 [project.optional-dependencies]
-ingest = ["stix2>=3.0.2,<4"]
+ingest = [
+    "stix2>=3.0.2,<4",
+    "stix2-patterns>=2.1.2",
+]
 test = [
     "pytest>=8",
     "pytest-cov",
     "stix2>=3.0.2,<4",
+    "stix2-patterns>=2.1.2",
 ]
 release = ["build", "twine"]
 

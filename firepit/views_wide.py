@@ -5,6 +5,7 @@ from firepit.views_extended import EXTENDED_VIEWS, install_extended_views
 
 WIDE_VIEWS = ("ThreatIntelIndicatorsW", "ThreatIntelObjectsW")
 PUBLIC_VIEWS = BASE_VIEWS + EXTENDED_VIEWS + WIDE_VIEWS
+VIEW_VERSION = "1"
 
 _INDICATOR_STRUCTURE = (
     '{"spec_version":"VARCHAR","name":"VARCHAR","description":"VARCHAR",'
@@ -34,14 +35,6 @@ _OBJECT_STRUCTURE = (
 )
 
 
-def _pattern_value(path: str) -> str:
-    return f"NULLIF(regexp_extract(Pattern, '{path}\\s*=\\s*''([^'']+)''', 1), '')"
-
-
-def _hash_value(stix_type: str, algorithm: str) -> str:
-    return _pattern_value(f"{stix_type}:hashes[^=]*{algorithm}[^=]*")
-
-
 def _actor_links(actor_relations: str) -> str:
     return f"""
         actor_links AS (
@@ -65,39 +58,10 @@ def install_wide_views(connection, public_schema: str):
     actor_relations = qname(public_schema, "ThreatIntelActorRelationsEx")
     actor_links = _actor_links(actor_relations)
 
-    file_hashes = {
-        algorithm: _hash_value("file", algorithm)
-        for algorithm in ("SHA-256", "SHA-512", "SHA-1", "MD5")
-    }
-    file_hash_value = "COALESCE(" + ", ".join(file_hashes.values()) + ")"
-    x509_hash = "COALESCE(" + ", ".join(
-        _hash_value("x509-certificate", algorithm)
-        for algorithm in ("SHA-256", "SHA-1")
-    ) + ")"
-
     create_view(connection, public_schema, "ThreatIntelIndicatorsW", f"""
         WITH {actor_links},
         parsed AS (
-            SELECT
-                i.*,
-                json_transform(i.Data, '{_INDICATOR_STRUCTURE}') AS stix,
-                {_pattern_value("ipv4-addr:value")} AS IPv4Address,
-                {_pattern_value("ipv6-addr:value")} AS IPv6Address,
-                {_pattern_value(r"network-traffic:src_ref\.value")} AS NetworkSourceIP,
-                {_pattern_value(r"network-traffic:dst_ref\.value")} AS NetworkDestinationIP,
-                {_pattern_value("domain-name:value")} AS DomainName,
-                {_pattern_value("email-addr:value")} AS EmailAddress,
-                {_pattern_value("url:value")} AS Url,
-                CASE
-                    WHEN regexp_matches(Pattern, 'file:hashes[^=]*SHA-256') THEN 'SHA-256'
-                    WHEN regexp_matches(Pattern, 'file:hashes[^=]*SHA-512') THEN 'SHA-512'
-                    WHEN regexp_matches(Pattern, 'file:hashes[^=]*SHA-1') THEN 'SHA-1'
-                    WHEN regexp_matches(Pattern, 'file:hashes[^=]*MD5') THEN 'MD5'
-                END AS FileHashType,
-                {file_hash_value} AS FileHashValue,
-                {x509_hash} AS X509Certificate,
-                {_pattern_value("x509-certificate:issuer")} AS X509Issuer,
-                {_pattern_value("x509-certificate:serial_number")} AS X509CertificateNumber
+            SELECT i.*, json_transform(i.Data, '{_INDICATOR_STRUCTURE}') AS stix
             FROM {indicators} i
         )
         SELECT
@@ -117,7 +81,40 @@ def install_wide_views(connection, public_schema: str):
             p.stix.extensions AS Extensions,
             p.stix.external_references AS ExternalReferences,
             p.stix.kill_chain_phases AS KillChainPhases,
-            COALESCE(p.IPv4Address, p.IPv6Address) AS NetworkIP,
+            CASE WHEN p.ObservableKey = 'ipv4-addr:value'
+                 THEN p.ObservableValue END AS IPv4Address,
+            CASE WHEN p.ObservableKey = 'ipv6-addr:value'
+                 THEN p.ObservableValue END AS IPv6Address,
+            CASE WHEN p.ObservableKey = 'network-traffic:src_ref.value'
+                 THEN p.ObservableValue END AS NetworkSourceIP,
+            CASE WHEN p.ObservableKey = 'network-traffic:dst_ref.value'
+                 THEN p.ObservableValue END AS NetworkDestinationIP,
+            CASE WHEN p.ObservableKey = 'domain-name:value'
+                 THEN p.ObservableValue END AS DomainName,
+            CASE WHEN p.ObservableKey = 'email-addr:value'
+                 THEN p.ObservableValue END AS EmailAddress,
+            CASE WHEN p.ObservableKey = 'url:value'
+                 THEN p.ObservableValue END AS Url,
+            CASE p.ObservableKey
+                WHEN 'file:hashes.SHA-256' THEN 'SHA-256'
+                WHEN 'file:hashes.SHA-512' THEN 'SHA-512'
+                WHEN 'file:hashes.SHA-1' THEN 'SHA-1'
+                WHEN 'file:hashes.MD5' THEN 'MD5'
+            END AS FileHashType,
+            CASE WHEN p.ObservableKey IN (
+                'file:hashes.SHA-256', 'file:hashes.SHA-512',
+                'file:hashes.SHA-1', 'file:hashes.MD5'
+            ) THEN p.ObservableValue END AS FileHashValue,
+            CASE WHEN p.ObservableKey IN (
+                'x509-certificate:hashes.SHA-256',
+                'x509-certificate:hashes.SHA-1'
+            ) THEN p.ObservableValue END AS X509Certificate,
+            CASE WHEN p.ObservableKey = 'x509-certificate:issuer'
+                 THEN p.ObservableValue END AS X509Issuer,
+            CASE WHEN p.ObservableKey = 'x509-certificate:serial_number'
+                 THEN p.ObservableValue END AS X509CertificateNumber,
+            CASE WHEN p.ObservableKey IN ('ipv4-addr:value', 'ipv6-addr:value')
+                 THEN p.ObservableValue END AS NetworkIP,
             a.ThreatActorIds, a.ThreatActorNames, a.ThreatActorRelationshipTypes
         FROM parsed p
         LEFT JOIN actor_links a ON a.RelatedId = p.Id

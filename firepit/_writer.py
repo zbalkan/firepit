@@ -8,12 +8,12 @@ import uuid
 
 import duckdb
 
-from firepit._stix import validate_bundle, validate_object
+from firepit._stix import indicator_observable, validate_bundle, validate_object
 from firepit.exceptions import InvalidObject
 from firepit.validate import validate_name
-from firepit.views_wide import install_views
+from firepit.views_wide import VIEW_VERSION, install_views
 
-_MODEL_VERSION = "8"
+_MODEL_VERSION = "9"
 _INTERNAL_PREFIX = "__firepit_"
 _OBJECT_STRUCTURE = '{"id":"VARCHAR","type":"VARCHAR","modified":"TIMESTAMPTZ"}'
 
@@ -71,7 +71,7 @@ class _Writer:
             (self.public_schema,),
         ).fetchone():
             raise RuntimeError(
-                "pre-v8 Firepit session is not supported; "
+                "pre-v9 Firepit session is not supported; "
                 "create a new database/session and re-ingest STIX 2.1 data"
             )
 
@@ -94,7 +94,7 @@ class _Writer:
 
         tables = {
             "runs": """
-                query_id VARCHAR PRIMARY KEY,
+                run_id VARCHAR PRIMARY KEY,
                 source VARCHAR,
                 stix_pattern VARCHAR,
                 native_query VARCHAR,
@@ -106,7 +106,7 @@ class _Writer:
             """,
             "bundles": """
                 bundle_id UUID PRIMARY KEY,
-                query_id VARCHAR NOT NULL,
+                run_id VARCHAR NOT NULL,
                 received_at TIMESTAMPTZ NOT NULL,
                 bundle JSON NOT NULL
             """,
@@ -115,12 +115,9 @@ class _Writer:
                 stix_type VARCHAR NOT NULL,
                 last_ingested_at TIMESTAMPTZ NOT NULL,
                 source VARCHAR,
+                observable_key VARCHAR,
+                observable_value VARCHAR,
                 data JSON NOT NULL
-            """,
-            "run_objects": """
-                query_id VARCHAR NOT NULL,
-                object_id VARCHAR NOT NULL,
-                UNIQUE(query_id, object_id)
             """,
         }
         for name, columns in tables.items():
@@ -128,26 +125,35 @@ class _Writer:
                 f"CREATE TABLE IF NOT EXISTS {self._table(name)} ({columns})"
             )
 
-        install_views(self.connection, self.public_schema, self.internal_schema)
+        row = self.connection.execute(
+            f"SELECT value FROM {metadata} WHERE name = 'view_version'"
+        ).fetchone()
+        if row is None or row[0] != VIEW_VERSION:
+            install_views(self.connection, self.public_schema, self.internal_schema)
+            self.connection.execute(
+                f"INSERT INTO {metadata} VALUES ('view_version', ?) "
+                "ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+                (VIEW_VERSION,),
+            )
 
-    def _start_run(self, query_id, source, stix_pattern, native_query):
+    def _start_run(self, run_id, source, stix_pattern, native_query):
         try:
             self.connection.execute(
                 f"INSERT INTO {self._table('runs')} "
-                "(query_id, source, stix_pattern, native_query, started_at, status, result_count) "
+                "(run_id, source, stix_pattern, native_query, started_at, status, result_count) "
                 "VALUES (?, ?, ?, ?, current_timestamp, 'RUNNING', 0)",
-                (query_id, source, stix_pattern, native_query),
+                (run_id, source, stix_pattern, native_query),
             )
         except duckdb.ConstraintException as exc:
             raise InvalidObject(
-                f"query_id {query_id!r} already exists; use a new acquisition run id"
+                f"run_id {run_id!r} already exists; use a new acquisition run id"
             ) from exc
 
-    def _finish_run(self, query_id, status, count=0, error=None):
+    def _finish_run(self, run_id, status, count=0, error=None):
         self.connection.execute(
             f"UPDATE {self._table('runs')} SET completed_at = current_timestamp, "
-            "status = ?, result_count = ?, error = ? WHERE query_id = ?",
-            (status, count, error, query_id),
+            "status = ?, result_count = ?, error = ? WHERE run_id = ?",
+            (status, count, error, run_id),
         )
 
     def _normalize_object(self, obj):
@@ -156,7 +162,11 @@ class _Writer:
             f"SELECT json_transform_strict(?::JSON, '{_OBJECT_STRUCTURE}')",
             (data,),
         ).fetchone()[0]
-        return stix["id"], stix["type"], stix["modified"], data
+        observable_key, observable_value = indicator_observable(obj)
+        return (
+            stix["id"], stix["type"], stix["modified"],
+            observable_key, observable_value, data,
+        )
 
     def _existing_object(self, object_id):
         return self.connection.execute(
@@ -190,8 +200,10 @@ class _Writer:
             )
         return "update"
 
-    def _write_object(self, obj, query_id, source):
-        object_id, stix_type, modified, data = self._normalize_object(obj)
+    def _write_object(self, obj, source):
+        object_id, stix_type, modified, observable_key, observable_value, data = (
+            self._normalize_object(obj)
+        )
         action = self._canonical_action(
             self._existing_object(object_id), data, modified, object_id
         )
@@ -200,31 +212,30 @@ class _Writer:
         if action == "insert":
             self.connection.execute(
                 f"INSERT INTO {table} "
-                "(id, stix_type, last_ingested_at, source, data) "
-                "VALUES (?, ?, current_timestamp, ?, ?::JSON)",
-                (object_id, stix_type, source, data),
+                "(id, stix_type, last_ingested_at, source, "
+                "observable_key, observable_value, data) "
+                "VALUES (?, ?, current_timestamp, ?, ?, ?, ?::JSON)",
+                (object_id, stix_type, source, observable_key, observable_value, data),
             )
         elif action == "update":
             self.connection.execute(
                 f"UPDATE {table} SET stix_type = ?, last_ingested_at = current_timestamp, "
-                "source = ?, data = ?::JSON WHERE id = ?",
-                (stix_type, source, data, object_id),
+                "source = ?, observable_key = ?, observable_value = ?, data = ?::JSON "
+                "WHERE id = ?",
+                (
+                    stix_type, source, observable_key, observable_value,
+                    data, object_id,
+                ),
             )
         elif action == "same":
             self.connection.execute(
-                f"UPDATE {table} SET last_ingested_at = current_timestamp, source = ? WHERE id = ?",
-                (source, object_id),
+                f"UPDATE {table} SET last_ingested_at = current_timestamp WHERE id = ?",
+                (object_id,),
             )
 
-        self.connection.execute(
-            f"INSERT INTO {self._table('run_objects')} (query_id, object_id) "
-            "VALUES (?, ?) ON CONFLICT DO NOTHING",
-            (query_id, object_id),
-        )
-
-    def ingest(self, query_id, bundles, source=None, stix_pattern=None, native_query=None):
-        query_id = str(query_id)
-        self._start_run(query_id, source, stix_pattern, native_query)
+    def ingest(self, run_id, bundles, source=None, stix_pattern=None, native_query=None):
+        run_id = str(run_id)
+        self._start_run(run_id, source, stix_pattern, native_query)
         bundles = bundles if isinstance(bundles, list) else [bundles]
 
         count = 0
@@ -235,27 +246,27 @@ class _Writer:
                 objects = validate_bundle(bundle)
                 self.connection.execute(
                     f"INSERT INTO {self._table('bundles')} "
-                    "(bundle_id, query_id, received_at, bundle) "
+                    "(bundle_id, run_id, received_at, bundle) "
                     "VALUES (?, ?, current_timestamp, json(?::JSON))",
-                    (str(uuid.uuid4()), query_id, _json_text(bundle)),
+                    (str(uuid.uuid4()), run_id, _json_text(bundle)),
                 )
                 for raw_obj in objects:
-                    self._write_object(validate_object(raw_obj), query_id, source)
+                    self._write_object(validate_object(raw_obj), source)
                     count += 1
 
-            self._finish_run(query_id, "COMPLETED", count)
+            self._finish_run(run_id, "COMPLETED", count)
             self.connection.execute("COMMIT")
         except Exception as exc:
             self.connection.execute("ROLLBACK")
-            self._finish_run(query_id, "FAILED", error=str(exc))
+            self._finish_run(run_id, "FAILED", error=str(exc))
             raise
 
 
-def ingest(path, query_id, bundles, session_id=None, source=None,
+def ingest(path, run_id, bundles, session_id=None, source=None,
            stix_pattern=None, native_query=None):
     """Private acquisition entry point used by STIX-Shifter orchestration."""
     writer = _Writer(path, session_id)
     try:
-        writer.ingest(query_id, bundles, source, stix_pattern, native_query)
+        writer.ingest(run_id, bundles, source, stix_pattern, native_query)
     finally:
         writer.close()

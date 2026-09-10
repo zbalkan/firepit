@@ -28,6 +28,7 @@ def install_base_views(connection, public_schema: str, internal_schema: str):
     create_view(connection, public_schema, "ThreatIntelIndicators", f"""
         WITH indicators AS (
             SELECT id, data, source, last_ingested_at,
+                   observable_key, observable_value,
                    json_transform_strict(data, '{_INDICATOR_STRUCTURE}') AS stix
             FROM {objects}
             WHERE stix_type = 'indicator'
@@ -47,8 +48,8 @@ def install_base_views(connection, public_schema: str, internal_schema: str):
             FALSE AS IsDeleted,
             'Firepit' AS LastUpdateMethod,
             stix.modified AS Modified,
-            CAST(NULL AS VARCHAR) AS ObservableKey,
-            CAST(NULL AS VARCHAR) AS ObservableValue,
+            observable_key AS ObservableKey,
+            observable_value AS ObservableValue,
             stix.pattern AS Pattern,
             CAST(NULL AS VARCHAR) AS _ResourceId,
             COALESCE(stix.revoked, FALSE) AS Revoked,
