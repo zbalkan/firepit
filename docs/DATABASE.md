@@ -88,8 +88,10 @@ These use conservative regular-expression extraction. They are intentionally bes
 
 The `__firepit_<session>` schema contains implementation tables for canonical objects, acquisition runs, bundles, and run/object provenance. Their structure is private and may change independently of the public view contracts.
 
+Canonical object storage is intentionally narrow: `Data` is authoritative, while the private object table keeps only the object ID, STIX type, last-ingestion timestamp, source, and canonical JSON. Version comparison reads the canonical object's `modified` value from `Data` rather than maintaining another copy.
+
 A query-only Firepit handle verifies that the public session schema contains the expected view family and no base tables. It opens DuckDB read-only and does not expose the underlying connection.
 
 ## Schema version
 
-Firepit 3 currently uses private model version 7. Older/pre-native database sessions are rejected explicitly; there is no implicit conversion from the legacy SQLite/PostgreSQL-era model.
+Firepit 3 currently uses private model version 8. Older/pre-native database sessions are rejected explicitly; there is no implicit conversion from earlier private models or the legacy SQLite/PostgreSQL-era model.
