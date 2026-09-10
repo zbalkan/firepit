@@ -12,9 +12,12 @@ Major changes:
 - STIX 2.0 embedded-object compatibility was removed.
 - Standard STIX 2.1 validation is delegated to OASIS `cti-python-stix2` on the private ingestion path.
 - Physical canonical-object and acquisition-provenance tables are private implementation details.
-- The public schema contains no base tables.
-- `ThreatIntelIndicators` and `ThreatIntelObjects`, modeled after Microsoft Sentinel's threat-intelligence tables, are the two main public views.
-- `ThreatIntelObservedObjects`, `ThreatIntelObservationSummary`, `ThreatIntelValueCounts`, and `ThreatIntelRelationships` are derived from the two main views to preserve useful historical hunting semantics.
+- The public schema contains views only and no base tables.
+- `ThreatIntelIndicators` and `ThreatIntelObjects`, modeled after Microsoft Sentinel's threat-intelligence tables, remain the two stable base contracts.
+- Firepit semantic views use the `ThreatIntel<Semantic>Ex` naming convention and provide relationship, threat-actor, observation, observable, and observable-statistics enrichment without restoring the old query engine.
+- `ThreatIntelIndicatorsW` and `ThreatIntelObjectsW` are wide one-row-per-base-record search views with computed STIX fields and common denormalized hunting columns.
+- The `Ex` tier replaces reusable historical Firepit semantics such as dereference joins, `timestamped`, `summary`, `number_observed`, and `value_counts`.
+- The `W` tier removes repeated JSON extraction and common bidirectional threat-actor correlation from analyst queries while keeping the original `Pattern` and `Data` authoritative.
 - SQLite/PostgreSQL dialect abstractions were removed.
 - Kestrel-era symtable/appdata state, mutable hunt variables, and compatibility query metadata were removed.
 - Relationship emulation tables and recursive auto-dereference were removed.
