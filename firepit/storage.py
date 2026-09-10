@@ -30,7 +30,7 @@ def _qident(name: str) -> str:
 
 
 class Firepit:
-    """Query-only handle over the two public threat-intelligence views."""
+    """Query-only handle over the public threat-intelligence views."""
 
     __slots__ = ("__connection", "__session_id", "__closed")
 
