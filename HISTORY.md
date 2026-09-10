@@ -13,6 +13,7 @@ Major changes:
 - Standard STIX 2.1 validation is delegated to OASIS `cti-python-stix2` on the private ingestion path.
 - Physical canonical-object and acquisition-provenance tables are private implementation details.
 - Canonical `Data` is authoritative; the private object table retains only identity/source/ingestion metadata needed by the public views.
+- JSON-to-column mapping and schema normalization use DuckDB `json_transform`/`json_transform_strict`, including native `STRUCT`, `LIST`, `MAP`, and timestamp projection.
 - The public schema contains views only and no base tables.
 - `ThreatIntelIndicators` and `ThreatIntelObjects`, modeled after Microsoft Sentinel's threat-intelligence tables, remain the two stable base contracts.
 - Firepit semantic views use the `ThreatIntel<Semantic>Ex` naming convention and provide relationship, threat-actor, observation, observable, and observable-statistics enrichment without restoring the old query engine.
