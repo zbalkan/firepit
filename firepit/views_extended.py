@@ -54,7 +54,7 @@ def install_extended_views(connection, public_schema: str):
         WITH {all_objects},
         relationships AS (
             SELECT r.*,
-                   json_transform_strict(r.Data, '{_RELATIONSHIP_STRUCTURE}') AS stix
+                   json_transform(r.Data, '{_RELATIONSHIP_STRUCTURE}') AS stix
             FROM {objects} r
             WHERE r.StixType = 'relationship'
         ),
@@ -117,7 +117,7 @@ def install_extended_views(connection, public_schema: str):
         WITH {all_objects},
         observed AS (
             SELECT o.*,
-                   json_transform_strict(o.Data, '{_OBSERVATION_STRUCTURE}') AS stix
+                   json_transform(o.Data, '{_OBSERVATION_STRUCTURE}') AS stix
             FROM {objects} o
             WHERE o.StixType = 'observed-data'
         ),

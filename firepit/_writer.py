@@ -159,7 +159,7 @@ class _Writer:
     def _normalize_object(self, obj):
         data = _json_text(obj)
         stix = self.connection.execute(
-            f"SELECT json_transform_strict(?::JSON, '{_OBJECT_STRUCTURE}')",
+            f"SELECT json_transform(?::JSON, '{_OBJECT_STRUCTURE}')",
             (data,),
         ).fetchone()[0]
         observable_key, observable_value = indicator_observable(obj)
@@ -171,7 +171,7 @@ class _Writer:
     def _existing_object(self, object_id):
         return self.connection.execute(
             f"SELECT data::VARCHAR, "
-            f"(json_transform_strict(data, '{_OBJECT_STRUCTURE}')).modified "
+            f"(json_transform(data, '{_OBJECT_STRUCTURE}')).modified "
             f"FROM {self._table('objects')} WHERE id = ?",
             (object_id,),
         ).fetchone()

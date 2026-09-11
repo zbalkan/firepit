@@ -29,7 +29,7 @@ def install_base_views(connection, public_schema: str, internal_schema: str):
         WITH indicators AS (
             SELECT id, data, source, last_ingested_at,
                    observable_key, observable_value,
-                   json_transform_strict(data, '{_INDICATOR_STRUCTURE}') AS stix
+                   json_transform(data, '{_INDICATOR_STRUCTURE}') AS stix
             FROM {objects}
             WHERE stix_type = 'indicator'
         )
