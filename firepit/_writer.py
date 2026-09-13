@@ -156,82 +156,107 @@ class _Writer:
             (status, count, error, run_id),
         )
 
-    def _normalize_object(self, obj):
-        data = _json_text(obj)
-        stix = self.connection.execute(
-            f"SELECT json_transform(?::JSON, '{_OBJECT_STRUCTURE}')",
-            (data,),
-        ).fetchone()[0]
-        observable_key, observable_value = indicator_observable(obj)
-        return (
-            stix["id"], stix["type"], stix["modified"],
-            observable_key, observable_value, data,
+    def _reject_batch_conflicts(self, pool_table):
+        """Raise InvalidObject on any of the three canonical-version conflicts,
+        checked across a pool of (id, modified, data) rows that mixes
+        already-canonical objects with this batch's incoming rows. This is
+        what makes an id that conflicts with itself *within* this batch get
+        caught the same way as one that conflicts with a prior ingest() call:
+        both are just rows sharing an id in the same pool.
+        """
+        checks = (
+            ("a.modified IS NULL AND b.modified IS NULL",
+             "reused an immutable id with different content"),
+            ("(a.modified IS NULL) != (b.modified IS NULL)",
+             "changed versioning semantics"),
+            ("a.modified = b.modified",
+             "has conflicting content at the same modified timestamp"),
         )
+        for condition, message in checks:
+            row = self.connection.execute(
+                f"SELECT a.id FROM {pool_table} a JOIN {pool_table} b "
+                f"ON a.id = b.id AND a.data != b.data AND {condition} "
+                "LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                raise InvalidObject(f"STIX object {row[0]!r} {message}")
 
-    def _existing_object(self, object_id):
-        return self.connection.execute(
-            f"SELECT data::VARCHAR, "
-            f"(json_transform(data, '{_OBJECT_STRUCTURE}')).modified "
-            f"FROM {self._table('objects')} WHERE id = ?",
-            (object_id,),
-        ).fetchone()
-
-    @staticmethod
-    def _canonical_action(existing, data, modified, object_id):
-        if existing is None:
-            return "insert"
-        if existing[0] == data:
-            return "same"
-
-        old_modified = existing[1]
-        if old_modified is None and modified is None:
-            raise InvalidObject(
-                f"STIX object {object_id!r} reused an immutable id with different content"
-            )
-        if old_modified is None or modified is None:
-            raise InvalidObject(
-                f"STIX object {object_id!r} changed versioning semantics"
-            )
-        if modified < old_modified:
-            return "older"
-        if modified == old_modified:
-            raise InvalidObject(
-                f"STIX object {object_id!r} has conflicting content at the same modified timestamp"
-            )
-        return "update"
-
-    def _write_object(self, obj, source):
-        object_id, stix_type, modified, observable_key, observable_value, data = (
-            self._normalize_object(obj)
-        )
-        action = self._canonical_action(
-            self._existing_object(object_id), data, modified, object_id
-        )
+    def _write_batch(self, objects, source):
+        """Normalize, validate, and upsert an entire batch of already-validated
+        STIX objects (id, observable_key, observable_value, data JSON text)
+        in a handful of set-based queries instead of one Python round trip
+        per object.
+        """
+        data = [o[0] for o in objects]
+        observable_keys = [o[1] for o in objects]
+        observable_values = [o[2] for o in objects]
         table = self._table("objects")
 
-        if action == "insert":
-            self.connection.execute(
-                f"INSERT INTO {table} "
-                "(id, stix_type, last_ingested_at, source, "
-                "observable_key, observable_value, data) "
-                "VALUES (?, ?, current_timestamp, ?, ?, ?, ?::JSON)",
-                (object_id, stix_type, source, observable_key, observable_value, data),
-            )
-        elif action == "update":
-            self.connection.execute(
-                f"UPDATE {table} SET stix_type = ?, last_ingested_at = current_timestamp, "
-                "source = ?, observable_key = ?, observable_value = ?, data = ?::JSON "
-                "WHERE id = ?",
-                (
-                    stix_type, source, observable_key, observable_value,
-                    data, object_id,
-                ),
-            )
-        elif action == "same":
-            self.connection.execute(
-                f"UPDATE {table} SET last_ingested_at = current_timestamp WHERE id = ?",
-                (object_id,),
-            )
+        self.connection.execute("DROP TABLE IF EXISTS staged")
+        self.connection.execute(
+            "CREATE TEMP TABLE staged AS "
+            f"SELECT (json_transform(data::JSON, '{_OBJECT_STRUCTURE}')).id AS id, "
+            f"(json_transform(data::JSON, '{_OBJECT_STRUCTURE}')).type AS stix_type, "
+            f"(json_transform(data::JSON, '{_OBJECT_STRUCTURE}')).modified AS modified, "
+            "ok::VARCHAR AS observable_key, ov::VARCHAR AS observable_value, data "
+            "FROM (SELECT UNNEST(?) AS data, UNNEST(?) AS ok, UNNEST(?) AS ov)",
+            (data, observable_keys, observable_values),
+        )
+
+        # Restrict the "existing" side to ids this batch actually touches --
+        # not the whole objects table, which would otherwise be copied on
+        # every ingest() call regardless of batch size.
+        self.connection.execute("DROP TABLE IF EXISTS pool")
+        self.connection.execute(
+            "CREATE TEMP TABLE pool AS "
+            f"SELECT id, (json_transform(data::JSON, '{_OBJECT_STRUCTURE}')).modified AS modified, data "
+            f"FROM {table} WHERE id IN (SELECT id FROM staged) "
+            "UNION ALL "
+            "SELECT id, modified, data FROM staged"
+        )
+        self._reject_batch_conflicts("pool")
+
+        # Any remaining same-id rows are now either strictly ordered by
+        # modified or byte-identical (conflicts were already rejected above),
+        # so picking the newest per id is safe.
+        self.connection.execute("DROP TABLE IF EXISTS candidates")
+        self.connection.execute(
+            "CREATE TEMP TABLE candidates AS "
+            "SELECT id, stix_type, modified, observable_key, observable_value, data "
+            "FROM staged "
+            "QUALIFY ROW_NUMBER() OVER "
+            "(PARTITION BY id ORDER BY modified DESC NULLS LAST) = 1"
+        )
+
+        # WHERE guards what to touch: identical content only refreshes
+        # last_ingested_at (source/data untouched -- re-seeing a payload from
+        # another source doesn't reassign SourceSystem); a strictly newer
+        # version overwrites everything; an older version matches neither
+        # branch of the CASE/WHERE and the row is left untouched entirely,
+        # which is what makes "older" a true no-op.
+        self.connection.execute(
+            f"INSERT INTO {table} "
+            "(id, stix_type, last_ingested_at, source, "
+            "observable_key, observable_value, data) "
+            "SELECT id, stix_type, now(), ?, "
+            "observable_key, observable_value, data FROM candidates "
+            "ON CONFLICT (id) DO UPDATE SET "
+            "last_ingested_at = now(), "
+            "stix_type = CASE WHEN EXCLUDED.data != objects.data "
+            "THEN EXCLUDED.stix_type ELSE objects.stix_type END, "
+            "source = CASE WHEN EXCLUDED.data != objects.data "
+            "THEN EXCLUDED.source ELSE objects.source END, "
+            "observable_key = CASE WHEN EXCLUDED.data != objects.data "
+            "THEN EXCLUDED.observable_key ELSE objects.observable_key END, "
+            "observable_value = CASE WHEN EXCLUDED.data != objects.data "
+            "THEN EXCLUDED.observable_value ELSE objects.observable_value END, "
+            "data = CASE WHEN EXCLUDED.data != objects.data "
+            "THEN EXCLUDED.data ELSE objects.data END "
+            "WHERE EXCLUDED.data = objects.data OR "
+            f"(json_transform(EXCLUDED.data::JSON, '{_OBJECT_STRUCTURE}')).modified > "
+            f"(json_transform(objects.data::JSON, '{_OBJECT_STRUCTURE}')).modified",
+            (source,),
+        )
 
     def ingest(self, run_id, bundles, source=None, stix_pattern=None, native_query=None):
         run_id = str(run_id)
@@ -241,6 +266,7 @@ class _Writer:
         count = 0
         self.connection.execute("BEGIN")
         try:
+            validated = []
             for supplied in bundles:
                 bundle = _bundle_dict(supplied)
                 objects = validate_bundle(bundle)
@@ -251,8 +277,13 @@ class _Writer:
                     (str(uuid.uuid4()), run_id, _json_text(bundle)),
                 )
                 for raw_obj in objects:
-                    self._write_object(validate_object(raw_obj), source)
-                    count += 1
+                    obj = validate_object(raw_obj)
+                    observable_key, observable_value = indicator_observable(obj)
+                    validated.append((_json_text(obj), observable_key, observable_value))
+
+            count = len(validated)
+            if validated:
+                self._write_batch(validated, source)
 
             self._finish_run(run_id, "COMPLETED", count)
             self.connection.execute("COMMIT")

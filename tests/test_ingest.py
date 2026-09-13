@@ -191,3 +191,63 @@ def test_immutable_sco_id_cannot_change_content(tmpdir):
     ingest(path, "run-1", _bundle(first), session_id="hunt")
     with pytest.raises(InvalidObject, match="immutable id"):
         ingest(path, "run-2", _bundle(second), session_id="hunt")
+
+
+def test_intra_batch_duplicate_ids_resolve_to_the_newest_version(tmpdir):
+    path = str(tmpdir.join("intra-batch.duckdb"))
+    actor_id = "threat-actor--22222222-2222-4222-8222-222222222222"
+
+    def actor(modified, name):
+        return {
+            "type": "threat-actor",
+            "spec_version": "2.1",
+            "id": actor_id,
+            "created": "2026-09-09T10:00:00Z",
+            "modified": modified,
+            "name": name,
+            "threat_actor_types": ["crime-syndicate"],
+        }
+
+    # All three versions arrive in ONE ingest() call, out of order.
+    bundle = _bundle(
+        actor("2026-09-09T10:00:00Z", "Old"),
+        actor("2026-09-11T10:00:00Z", "Newest"),
+        actor("2026-09-10T10:00:00Z", "Mid"),
+    )
+    ingest(path, "run-1", bundle, session_id="hunt")
+
+    with get_storage(path, "hunt") as store:
+        assert _data_name(store, "threat-actor") == "Newest"
+
+
+def test_intra_batch_conflicting_same_modified_version_is_rejected(tmpdir):
+    path = str(tmpdir.join("intra-batch-conflict.duckdb"))
+    actor_id = "threat-actor--22222222-2222-4222-8222-222222222222"
+    first = {
+        "type": "threat-actor",
+        "spec_version": "2.1",
+        "id": actor_id,
+        "created": "2026-09-09T10:00:00Z",
+        "modified": "2026-09-09T10:00:00Z",
+        "name": "Name A",
+        "threat_actor_types": ["crime-syndicate"],
+    }
+    second = {**first, "name": "Name B"}
+
+    with pytest.raises(InvalidObject, match="same modified timestamp"):
+        ingest(path, "run-1", _bundle(first, second), session_id="hunt")
+
+
+def test_intra_batch_immutable_sco_id_conflict_is_rejected(tmpdir):
+    path = str(tmpdir.join("intra-batch-immutable.duckdb"))
+    object_id = "ipv4-addr--33333333-3333-4333-8333-333333333333"
+    first = {
+        "type": "ipv4-addr",
+        "spec_version": "2.1",
+        "id": object_id,
+        "value": "192.0.2.1",
+    }
+    second = {**first, "value": "192.0.2.2"}
+
+    with pytest.raises(InvalidObject, match="immutable id"):
+        ingest(path, "run-1", _bundle(first, second), session_id="hunt")
