@@ -72,7 +72,7 @@ The public object does not expose a DuckDB connection or write API. Queries must
 
 ## JSON and schema handling
 
-`Data` is the canonical STIX object. Firepit does not maintain a parallel hand-written STIX schema. OASIS validates standard STIX objects at ingestion, while DuckDB performs JSON mapping and type normalization with `json_transform`/`json_transform_strict` for analyst-facing projections and the internal version envelope.
+`Data` is the canonical STIX object. Firepit does not maintain a parallel hand-written STIX schema. OASIS validates standard STIX objects at ingestion, while DuckDB performs JSON mapping and type normalization with `json_transform` for analyst-facing projections and the internal version envelope.
 
 Known homogeneous fields become DuckDB scalar, `LIST`, `MAP`, and `STRUCT` values. Fields not part of a projection remain available unchanged in `Data`.
 

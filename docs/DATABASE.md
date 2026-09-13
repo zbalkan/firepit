@@ -6,7 +6,7 @@ Firepit stores canonical STIX 2.1 objects and acquisition-run provenance in priv
 
 `Data` is the authoritative STIX object. Firepit does not duplicate the complete STIX schema in Python or maintain a table per object type.
 
-OASIS `cti-python-stix2` validates standard objects at the ingestion boundary. DuckDB performs analytical mapping with `json_transform` and `json_transform_strict`: selected structures become native `STRUCT`, arrays become `LIST`, homogeneous dictionaries such as hashes become `MAP`, and timestamps use `TIMESTAMPTZ`. Fields outside those projections remain unchanged in `Data`.
+OASIS `cti-python-stix2` validates standard objects at the ingestion boundary. DuckDB performs analytical mapping with `json_transform`: selected structures become native `STRUCT`, arrays become `LIST`, homogeneous dictionaries such as hashes become `MAP`, and timestamps use `TIMESTAMPTZ`. `json_transform` fills a field absent from the source JSON with `NULL` rather than erroring, which matters here because almost every STIX property beyond `id`/`type` is optional. Fields outside those projections remain unchanged in `Data`.
 
 The private writer also uses DuckDB to normalize the small identity/version envelope (`id`, `type`, `modified`) before canonical-version comparison.
 

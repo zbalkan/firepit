@@ -72,7 +72,7 @@ Canonical versioned STIX objects are selected by `modified`, not arrival order. 
 
 ### DuckDB-native JSON mapping
 
-Complete STIX remains available as canonical `Data` JSON. DuckDB performs selected schema mapping with `json_transform`/`json_transform_strict`; analytical projections use native scalar, `STRUCT`, `LIST`, and `MAP` types without maintaining a complete handwritten STIX schema in Firepit.
+Complete STIX remains available as canonical `Data` JSON. DuckDB performs selected schema mapping with `json_transform`; analytical projections use native scalar, `STRUCT`, `LIST`, and `MAP` types without maintaining a complete handwritten STIX schema in Firepit.
 
 ### Public view contract
 

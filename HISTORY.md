@@ -16,7 +16,7 @@ Major changes:
 - Private acquisition identity is a `run_id`, not a reusable query identity.
 - The unused per-run/per-object membership table was removed; raw bundles retain the acquired object membership.
 - Canonical `Data` remains authoritative. Re-seeing identical content does not change its canonical `SourceSystem` merely because another feed arrived later.
-- JSON-to-column mapping and schema normalization use DuckDB `json_transform`/`json_transform_strict`, including native `STRUCT`, `LIST`, `MAP`, and timestamp projection.
+- JSON-to-column mapping and schema normalization use DuckDB `json_transform`, including native `STRUCT`, `LIST`, `MAP`, and timestamp projection. The lenient form is required throughout: almost every STIX property beyond `id`/`type` is optional.
 - Canonical mutable STIX objects are selected by `modified` rather than arrival order; conflicting content at the same version is rejected.
 - The public schema contains views only and no base tables.
 - `ThreatIntelIndicators` and `ThreatIntelObjects`, modeled after Microsoft Sentinel's threat-intelligence tables, are the two stable base schema contracts.
