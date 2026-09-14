@@ -174,6 +174,13 @@ class _Writer:
         )
 
     def _reject_batch_conflicts(self, pool_table: str) -> None:
+        """Raise InvalidObject on any of the three canonical-version conflicts,
+        checked across a pool of (id, modified, data) rows that mixes
+        already-canonical objects with this batch's incoming rows. This is
+        what makes an id that conflicts with itself *within* this batch get
+        caught the same way as one that conflicts with a prior ingest() call:
+        both are just rows sharing an id in the same pool.
+        """
         checks = (
             ("a.modified IS NULL AND b.modified IS NULL",
              "reused an immutable id with different content"),
@@ -192,6 +199,11 @@ class _Writer:
                 raise InvalidObject(f"STIX object {row[0]!r} {message}")
 
     def _write_batch(self, objects: list[tuple[Any, Any, Any]], source: str | None) -> None:
+        """Normalize, validate, and upsert an entire batch of already-validated
+        STIX objects (id, observable_key, observable_value, data JSON text)
+        in a handful of set-based queries instead of one Python round trip
+        per object.
+        """
         data = [o[0] for o in objects]
         observable_keys = [o[1] for o in objects]
         observable_values = [o[2] for o in objects]
@@ -208,6 +220,9 @@ class _Writer:
             (data, observable_keys, observable_values),
         )
 
+        # Restrict the "existing" side to ids this batch actually touches --
+        # not the whole objects table, which would otherwise be copied on
+        # every ingest() call regardless of batch size.
         self.connection.execute("DROP TABLE IF EXISTS pool")
         self.connection.execute(
             "CREATE TEMP TABLE pool AS "
@@ -218,6 +233,9 @@ class _Writer:
         )
         self._reject_batch_conflicts("pool")
 
+        # Any remaining same-id rows are now either strictly ordered by
+        # modified or byte-identical (conflicts were already rejected above),
+        # so picking the newest per id is safe.
         self.connection.execute("DROP TABLE IF EXISTS candidates")
         self.connection.execute(
             "CREATE TEMP TABLE candidates AS "
@@ -227,6 +245,12 @@ class _Writer:
             "(PARTITION BY id ORDER BY modified DESC NULLS LAST) = 1"
         )
 
+        # WHERE guards what to touch: identical content only refreshes
+        # last_ingested_at (source/data untouched -- re-seeing a payload from
+        # another source doesn't reassign SourceSystem); a strictly newer
+        # version overwrites everything; an older version matches neither
+        # branch of the CASE/WHERE and the row is left untouched entirely,
+        # which is what makes "older" a true no-op.
         self.connection.execute(
             f"INSERT INTO {table} "
             "(id, stix_type, last_ingested_at, source, "

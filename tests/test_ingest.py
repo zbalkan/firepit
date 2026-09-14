@@ -1,9 +1,11 @@
+import io
 import json
+from pathlib import Path
 
 import pytest
 
 from firepit import get_storage
-from firepit._writer import ingest
+from firepit._writer import _bundle_dict, ingest
 from firepit.exceptions import InvalidObject
 
 
@@ -251,3 +253,82 @@ def test_intra_batch_immutable_sco_id_conflict_is_rejected(tmpdir):
 
     with pytest.raises(InvalidObject, match="immutable id"):
         ingest(path, "run-1", _bundle(first, second), session_id="hunt")
+
+
+def test_bundle_dict_accepts_a_path_object(tmpdir):
+    bundle = _bundle(_indicator())
+    path = Path(str(tmpdir.join("bundle.json")))
+    path.write_text(json.dumps(bundle), encoding="utf-8")
+    assert _bundle_dict(path) == bundle
+
+
+def test_bundle_dict_accepts_a_file_like_object():
+    bundle = _bundle(_indicator())
+    assert _bundle_dict(io.StringIO(json.dumps(bundle))) == bundle
+
+
+def test_bundle_dict_accepts_a_binary_file_like_object():
+    bundle = _bundle(_indicator())
+    assert _bundle_dict(io.BytesIO(json.dumps(bundle).encode("utf-8"))) == bundle
+
+
+def test_bundle_dict_accepts_a_json_string():
+    bundle = _bundle(_indicator())
+    assert _bundle_dict(json.dumps(bundle)) == bundle
+
+
+def test_bundle_dict_accepts_a_string_path(tmpdir):
+    bundle = _bundle(_indicator())
+    path = str(tmpdir.join("bundle.json"))
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(bundle, handle)
+    assert _bundle_dict(path) == bundle
+
+
+def test_bundle_dict_rejects_unsupported_types():
+    with pytest.raises(TypeError, match="bundle must be"):
+        _bundle_dict(12345)  # type: ignore[arg-type]
+
+
+def test_ingest_accepts_multiple_bundles_in_one_call(tmpdir):
+    path = str(tmpdir.join("multi-bundle.duckdb"))
+    actor_id = "threat-actor--22222222-2222-4222-8222-222222222222"
+    actor = {
+        "type": "threat-actor",
+        "spec_version": "2.1",
+        "id": actor_id,
+        "created": "2026-09-09T10:00:00Z",
+        "modified": "2026-09-09T10:00:00Z",
+        "name": "Example Actor",
+        "threat_actor_types": ["crime-syndicate"],
+    }
+    bundles = [_bundle(_indicator()), _bundle(actor)]
+
+    ingest(path, "run-1", bundles, session_id="hunt")
+
+    with get_storage(path, "hunt") as store:
+        assert store.query_value(
+            'SELECT COUNT(*) FROM "ThreatIntelIndicators"'
+        ) == 1
+        assert store.query_value(
+            'SELECT COUNT(*) FROM "ThreatIntelObjects" WHERE StixType = \'threat-actor\''
+        ) == 1
+
+
+def test_ingest_accepts_a_generator_of_bundles(tmpdir):
+    path = str(tmpdir.join("generator-bundle.duckdb"))
+    bundles = (_bundle(_indicator(object_id=f"indicator--{n:08d}-1111-4111-8111-111111111111"))
+               for n in range(2))
+
+    ingest(path, "run-1", bundles, session_id="hunt")
+
+    with get_storage(path, "hunt") as store:
+        assert store.query_value(
+            'SELECT COUNT(*) FROM "ThreatIntelIndicators"'
+        ) == 2
+
+
+def test_ingest_rejects_an_unsupported_bundles_argument(tmpdir):
+    path = str(tmpdir.join("bad-bundles.duckdb"))
+    with pytest.raises(TypeError, match="bundle must be"):
+        ingest(path, "run-1", 12345, session_id="hunt")  # type: ignore[arg-type]
