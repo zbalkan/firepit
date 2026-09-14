@@ -50,3 +50,7 @@ include = ["firepit", "firepit.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[[tool.mypy.overrides]]
+module = ["stix2.*", "stix2patterns.*"]
+follow_untyped_imports = true
