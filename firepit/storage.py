@@ -36,6 +36,7 @@ class Firepit:
         try:
             connection.execute("SET python_enable_replacements=false")
             connection.execute("SET enable_external_access=false")
+            connection.execute("SET TimeZone='UTC'")
             connection.execute(f"SET search_path={_qident(self.__session_id)}")
             self.__connection = connection
             self.__verify_public_surface()

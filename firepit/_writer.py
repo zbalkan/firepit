@@ -53,6 +53,7 @@ class _Writer:
         self.internal_schema = _INTERNAL_PREFIX + self.public_schema
         self.connection = duckdb.connect(self.dbname)
         self.connection.execute("SET python_enable_replacements=false")
+        self.connection.execute("SET TimeZone='UTC'")
         self._prepare_model()
 
     def _table(self, name):
