@@ -4,10 +4,10 @@ import re
 
 from firepit.exceptions import InvalidSession
 
-_NAME_RE = re.compile(r"^[\w-]+$", re.ASCII)
+_NAME_RE: re.Pattern[str] = re.compile(r"^[\w-]+$", re.ASCII)
 
 
-def validate_name(name):
+def validate_name(name: str) -> None:
     """Require a simple schema identifier."""
     if not isinstance(name, str) or _NAME_RE.fullmatch(name) is None:
         raise InvalidSession(name)

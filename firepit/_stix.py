@@ -1,6 +1,7 @@
 """OASIS-backed STIX 2.1 validation and indicator inspection."""
 
 from functools import lru_cache
+from typing import Any
 
 from firepit.exceptions import InvalidObject
 
@@ -22,7 +23,7 @@ def _oasis():
 
 
 @lru_cache(maxsize=1)
-def _patterns():
+def _patterns() -> dict[str, Any]:
     try:
         from stix2patterns.v20.pattern import Pattern as Pattern20
         from stix2patterns.v21.pattern import Pattern as Pattern21
@@ -33,7 +34,7 @@ def _patterns():
     return {"2.0": Pattern20, "2.1": Pattern21}
 
 
-def _validate_type_and_id(obj_type: str, object_id: str):
+def _validate_type_and_id(obj_type: str, object_id: str) -> None:
     _, _, _, IDProperty, TypeProperty = _oasis()
     try:
         TypeProperty(obj_type, spec_version="2.1")
@@ -42,7 +43,7 @@ def _validate_type_and_id(obj_type: str, object_id: str):
         raise InvalidObject(str(exc)) from exc
 
 
-def validate_bundle(bundle):
+def validate_bundle(bundle) -> list[Any]:
     if not isinstance(bundle, dict) or bundle.get("type") != "bundle":
         raise InvalidObject("expected a STIX bundle")
 
@@ -57,7 +58,7 @@ def validate_bundle(bundle):
     return objects
 
 
-def validate_object(obj):
+def validate_object(obj) -> dict[Any, Any]:
     if not isinstance(obj, dict):
         raise InvalidObject("every bundle member must be a STIX object")
 
@@ -93,7 +94,7 @@ def validate_object(obj):
     return obj
 
 
-def indicator_observable(obj):
+def indicator_observable(obj) -> tuple[None, None] | tuple[str, str]:
     """Return one unambiguous equality observable from a STIX Indicator.
 
     Complex patterns deliberately return ``(None, None)`` rather than exposing

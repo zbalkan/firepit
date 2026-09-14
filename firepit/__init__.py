@@ -6,4 +6,4 @@ __version__ = "3.0.0"
 
 from firepit.storage import Firepit, get_storage
 
-__all__ = ["Firepit", "get_storage"]
+__all__: list[str] = ["Firepit", "get_storage"]

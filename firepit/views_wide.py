@@ -1,6 +1,9 @@
 """Wide one-row-per-record views and public-view installation."""
 
-from firepit.views_base import BASE_VIEWS, create_view, install_base_views, qname
+from duckdb import DuckDBPyConnection
+
+from firepit.views_base import (BASE_VIEWS, create_view, install_base_views,
+                                qname)
 from firepit.views_extended import EXTENDED_VIEWS, install_extended_views
 
 WIDE_VIEWS = ("ThreatIntelIndicatorsW", "ThreatIntelObjectsW")
@@ -51,7 +54,7 @@ def _actor_links(actor_relations: str) -> str:
     """
 
 
-def install_wide_views(connection, public_schema: str):
+def install_wide_views(connection: DuckDBPyConnection, public_schema: str) -> None:
     indicators = qname(public_schema, "ThreatIntelIndicators")
     objects = qname(public_schema, "ThreatIntelObjects")
     relationships = qname(public_schema, "ThreatIntelRelationshipsEx")
@@ -185,7 +188,7 @@ def install_wide_views(connection, public_schema: str):
     """)
 
 
-def install_views(connection, public_schema: str, internal_schema: str):
+def install_views(connection: DuckDBPyConnection, public_schema: str, internal_schema: str) -> None:
     existing = {
         row[0]
         for row in connection.execute(

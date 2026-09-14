@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import uuid
+from collections.abc import Iterable
+from typing import IO, Any, Mapping
 
 import duckdb
 
-from firepit._stix import indicator_observable, validate_bundle, validate_object
+from firepit._stix import (indicator_observable, validate_bundle,
+                           validate_object)
 from firepit.exceptions import InvalidObject
 from firepit.validate import validate_name
 from firepit.views_wide import VIEW_VERSION, install_views
@@ -16,6 +20,9 @@ from firepit.views_wide import VIEW_VERSION, install_views
 _MODEL_VERSION = "9"
 _INTERNAL_PREFIX = "__firepit_"
 _OBJECT_STRUCTURE = '{"id":"VARCHAR","type":"VARCHAR","modified":"TIMESTAMPTZ"}'
+
+SingleBundle = Mapping[str, Any] | str | os.PathLike | IO[str] | IO[bytes]
+BundleCollection = Iterable[SingleBundle]
 
 
 def _qident(name: str) -> str:
@@ -26,27 +33,33 @@ def _qname(schema: str, name: str) -> str:
     return f"{_qident(schema)}.{_qident(name)}"
 
 
-def _bundle_dict(bundle):
-    if isinstance(bundle, dict):
-        return bundle
-    if hasattr(bundle, "read"):
+def _bundle_dict(bundle: SingleBundle) -> dict:
+    if isinstance(bundle, Mapping):
+        return dict(bundle)
+    if isinstance(bundle, io.IOBase):
         data = bundle.read()
-        return json.loads(data.decode() if isinstance(data, bytes) else data)
-    if isinstance(bundle, (str, os.PathLike)):
-        value = os.fspath(bundle)
-        if isinstance(value, str) and value.lstrip().startswith("{"):
-            return json.loads(value)
-        with open(value, encoding="utf-8") as handle:
+        if isinstance(data, bytes):
+            data = data.decode("utf-8")
+        return json.loads(data)
+    if isinstance(bundle, os.PathLike):
+        with open(bundle, encoding="utf-8") as handle:
             return json.load(handle)
-    raise TypeError("bundle must be a dict, JSON string, file-like object, or path")
+    if isinstance(bundle, str):
+        stripped = bundle.lstrip()
+        if stripped.startswith(("{", "[")):
+            return json.loads(bundle)
+        with open(bundle, encoding="utf-8") as handle:
+            return json.load(handle)
+    raise TypeError(
+        "bundle must be a dict, JSON string, file-like object, or path")
 
 
-def _json_text(value) -> str:
+def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 class _Writer:
-    def __init__(self, dbname, session_id=None):
+    def __init__(self, dbname: str | os.PathLike, session_id: str | None = None) -> None:
         self.dbname = os.fspath(dbname)
         self.public_schema = session_id or "main"
         validate_name(self.public_schema)
@@ -56,15 +69,16 @@ class _Writer:
         self.connection.execute("SET TimeZone='UTC'")
         self._prepare_model()
 
-    def _table(self, name):
+    def _table(self, name: str) -> str:
         return _qname(self.internal_schema, name)
 
-    def close(self):
+    def close(self) -> None:
         self.connection.close()
 
-    def _prepare_model(self):
+    def _prepare_model(self) -> None:
         for schema in (self.public_schema, self.internal_schema):
-            self.connection.execute(f"CREATE SCHEMA IF NOT EXISTS {_qident(schema)}")
+            self.connection.execute(
+                f"CREATE SCHEMA IF NOT EXISTS {_qident(schema)}")
 
         if self.connection.execute(
             "SELECT 1 FROM information_schema.tables "
@@ -85,9 +99,10 @@ class _Writer:
             f"INSERT INTO {metadata} VALUES ('model_version', ?) ON CONFLICT DO NOTHING",
             (_MODEL_VERSION,),
         )
-        version = self.connection.execute(
+        row = self.connection.execute(
             f"SELECT value FROM {metadata} WHERE name = 'model_version'"
-        ).fetchone()[0]
+        ).fetchone()
+        version = row[0] if row else None
         if version != _MODEL_VERSION:
             raise RuntimeError(
                 f"unsupported internal model version {version}; create a new database/session"
@@ -130,14 +145,15 @@ class _Writer:
             f"SELECT value FROM {metadata} WHERE name = 'view_version'"
         ).fetchone()
         if row is None or row[0] != VIEW_VERSION:
-            install_views(self.connection, self.public_schema, self.internal_schema)
+            install_views(self.connection, self.public_schema,
+                          self.internal_schema)
             self.connection.execute(
                 f"INSERT INTO {metadata} VALUES ('view_version', ?) "
                 "ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
                 (VIEW_VERSION,),
             )
 
-    def _start_run(self, run_id, source, stix_pattern, native_query):
+    def _start_run(self, run_id: str, source: str | None, stix_pattern: str | None, native_query: str | None) -> None:
         try:
             self.connection.execute(
                 f"INSERT INTO {self._table('runs')} "
@@ -150,21 +166,14 @@ class _Writer:
                 f"run_id {run_id!r} already exists; use a new acquisition run id"
             ) from exc
 
-    def _finish_run(self, run_id, status, count=0, error=None):
+    def _finish_run(self, run_id: str, status: str, count: int = 0, error: str | None = None) -> None:
         self.connection.execute(
             f"UPDATE {self._table('runs')} SET completed_at = current_timestamp, "
             "status = ?, result_count = ?, error = ? WHERE run_id = ?",
             (status, count, error, run_id),
         )
 
-    def _reject_batch_conflicts(self, pool_table):
-        """Raise InvalidObject on any of the three canonical-version conflicts,
-        checked across a pool of (id, modified, data) rows that mixes
-        already-canonical objects with this batch's incoming rows. This is
-        what makes an id that conflicts with itself *within* this batch get
-        caught the same way as one that conflicts with a prior ingest() call:
-        both are just rows sharing an id in the same pool.
-        """
+    def _reject_batch_conflicts(self, pool_table: str) -> None:
         checks = (
             ("a.modified IS NULL AND b.modified IS NULL",
              "reused an immutable id with different content"),
@@ -182,12 +191,7 @@ class _Writer:
             if row is not None:
                 raise InvalidObject(f"STIX object {row[0]!r} {message}")
 
-    def _write_batch(self, objects, source):
-        """Normalize, validate, and upsert an entire batch of already-validated
-        STIX objects (id, observable_key, observable_value, data JSON text)
-        in a handful of set-based queries instead of one Python round trip
-        per object.
-        """
+    def _write_batch(self, objects: list[tuple[Any, Any, Any]], source: str | None) -> None:
         data = [o[0] for o in objects]
         observable_keys = [o[1] for o in objects]
         observable_values = [o[2] for o in objects]
@@ -204,9 +208,6 @@ class _Writer:
             (data, observable_keys, observable_values),
         )
 
-        # Restrict the "existing" side to ids this batch actually touches --
-        # not the whole objects table, which would otherwise be copied on
-        # every ingest() call regardless of batch size.
         self.connection.execute("DROP TABLE IF EXISTS pool")
         self.connection.execute(
             "CREATE TEMP TABLE pool AS "
@@ -217,9 +218,6 @@ class _Writer:
         )
         self._reject_batch_conflicts("pool")
 
-        # Any remaining same-id rows are now either strictly ordered by
-        # modified or byte-identical (conflicts were already rejected above),
-        # so picking the newest per id is safe.
         self.connection.execute("DROP TABLE IF EXISTS candidates")
         self.connection.execute(
             "CREATE TEMP TABLE candidates AS "
@@ -229,12 +227,6 @@ class _Writer:
             "(PARTITION BY id ORDER BY modified DESC NULLS LAST) = 1"
         )
 
-        # WHERE guards what to touch: identical content only refreshes
-        # last_ingested_at (source/data untouched -- re-seeing a payload from
-        # another source doesn't reassign SourceSystem); a strictly newer
-        # version overwrites everything; an older version matches neither
-        # branch of the CASE/WHERE and the row is left untouched entirely,
-        # which is what makes "older" a true no-op.
         self.connection.execute(
             f"INSERT INTO {table} "
             "(id, stix_type, last_ingested_at, source, "
@@ -259,16 +251,25 @@ class _Writer:
             (source,),
         )
 
-    def ingest(self, run_id, bundles, source=None, stix_pattern=None, native_query=None):
+    def ingest(self, run_id: str, bundles: SingleBundle | Iterable[SingleBundle],
+               source: str | None = None, stix_pattern: str | None = None, native_query: str | None = None) -> None:
         run_id = str(run_id)
         self._start_run(run_id, source, stix_pattern, native_query)
-        bundles = bundles if isinstance(bundles, list) else [bundles]
+
+        bundle_iter: Iterable[SingleBundle]
+        if isinstance(bundles, (str, os.PathLike, Mapping, io.IOBase)):
+            bundle_iter = [bundles]  # type: ignore[list-item]
+        else:
+            try:
+                bundle_iter = iter(bundles)  # type: ignore[assignment]
+            except TypeError:
+                bundle_iter = [bundles]  # type: ignore[list-item]
 
         count = 0
         self.connection.execute("BEGIN")
         try:
             validated = []
-            for supplied in bundles:
+            for supplied in bundle_iter:
                 bundle = _bundle_dict(supplied)
                 objects = validate_bundle(bundle)
                 self.connection.execute(
@@ -279,8 +280,10 @@ class _Writer:
                 )
                 for raw_obj in objects:
                     obj = validate_object(raw_obj)
-                    observable_key, observable_value = indicator_observable(obj)
-                    validated.append((_json_text(obj), observable_key, observable_value))
+                    observable_key, observable_value = indicator_observable(
+                        obj)
+                    validated.append(
+                        (_json_text(obj), observable_key, observable_value))
 
             count = len(validated)
             if validated:
@@ -294,9 +297,12 @@ class _Writer:
             raise
 
 
-def ingest(path, run_id, bundles, session_id=None, source=None,
-           stix_pattern=None, native_query=None):
+def ingest(path: str | os.PathLike, run_id: str,
+           bundles: SingleBundle | Iterable[SingleBundle],
+           session_id: str | None = None, source: str | None = None,
+           stix_pattern: str | None = None, native_query: str | None = None) -> None:
     """Private acquisition entry point used by STIX-Shifter orchestration."""
+
     writer = _Writer(path, session_id)
     try:
         writer.ingest(run_id, bundles, source, stix_pattern, native_query)

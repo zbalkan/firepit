@@ -1,5 +1,7 @@
 """Firepit semantic views derived only from the two base views."""
 
+from duckdb import DuckDBPyConnection
+
 from firepit.views_base import create_view, qname
 
 EXTENDED_VIEWS = (
@@ -45,7 +47,7 @@ def all_objects_cte(public_schema: str) -> str:
     """
 
 
-def install_extended_views(connection, public_schema: str):
+def install_extended_views(connection: DuckDBPyConnection, public_schema: str) -> None:
     objects = qname(public_schema, "ThreatIntelObjects")
     all_objects = all_objects_cte(public_schema)
 

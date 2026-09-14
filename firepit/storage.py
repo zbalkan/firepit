@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any, Literal
 
 import duckdb
 
@@ -23,7 +24,7 @@ class Firepit:
 
     __slots__ = ("__connection", "__session_id", "__closed")
 
-    def __init__(self, dbname, session_id=None):
+    def __init__(self, dbname: str | os.PathLike, session_id: str | None = None) -> None:
         self.__session_id = session_id or "main"
         validate_name(self.__session_id)
         self.__closed = False
@@ -45,10 +46,10 @@ class Firepit:
             raise
 
     @property
-    def session_id(self):
+    def session_id(self) -> str:
         return self.__session_id
 
-    def __verify_public_surface(self):
+    def __verify_public_surface(self) -> None:
         rows = self.__connection.execute(
             "SELECT table_name, table_type FROM information_schema.tables "
             "WHERE table_schema = ?",
@@ -85,7 +86,7 @@ class Firepit:
                 + "; ".join(problems)
             )
 
-    def __validated_sql(self, sql: str):
+    def __validated_sql(self, sql: str) -> str:
         self.__ensure_open()
         if not isinstance(sql, str) or not sql.strip():
             raise InvalidQuery("query must be a non-empty SQL string")
@@ -102,7 +103,7 @@ class Firepit:
             raise InvalidQuery("only the public Firepit views are queryable")
         return statement.query
 
-    def __execute(self, sql, parameters=None):
+    def __execute(self, sql: str, parameters: object | None = None) -> duckdb.DuckDBPyConnection:
         try:
             return self.__connection.execute(
                 self.__validated_sql(sql), parameters or ()
@@ -111,28 +112,28 @@ class Firepit:
             raise InvalidQuery(str(exc)) from exc
 
     @staticmethod
-    def __dict(cursor, row):
+    def __dict(cursor, row) -> dict[Any, Any] | None:
         if row is None:
             return None
         return dict(zip((col[0] for col in cursor.description or ()), row))
 
-    def query(self, sql, parameters=None):
+    def query(self, sql: str, parameters: object | None = None) -> list[dict[str, Any]]:
         """Execute one SELECT and return all rows as dictionaries."""
         cursor = self.__execute(sql, parameters)
         columns = tuple(col[0] for col in cursor.description or ())
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-    def query_one(self, sql, parameters=None):
+    def query_one(self, sql: str, parameters: object | None = None) -> dict[Any, Any] | None:
         """Execute one SELECT and return its first row."""
         cursor = self.__execute(sql, parameters)
         return self.__dict(cursor, cursor.fetchone())
 
-    def query_value(self, sql, parameters=None):
+    def query_value(self, sql: str, parameters: object | None = None) -> Any | None:
         """Execute one SELECT and return its first scalar value."""
         row = self.__execute(sql, parameters).fetchone()
         return row[0] if row else None
 
-    def _view(self, name, where=None, parameters=None, limit=None):
+    def _view(self, name: str, where: str | None = None, parameters: object | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         sql = f'SELECT * FROM "{name}"'
         if where:
             sql += f" WHERE {where}"
@@ -143,29 +144,29 @@ class Firepit:
             sql += f" LIMIT {limit}"
         return self.query(sql, parameters)
 
-    def indicators(self, where=None, parameters=None, *, limit=None):
+    def indicators(self, where: str | None = None, parameters: object | None = None, *, limit: int | None = None) -> list[dict[str, Any]]:
         return self._view("ThreatIntelIndicators", where, parameters, limit)
 
-    def objects(self, where=None, parameters=None, *, limit=None):
+    def objects(self, where: str | None = None, parameters: object | None = None, *, limit: int | None = None) -> list[dict[str, Any]]:
         return self._view("ThreatIntelObjects", where, parameters, limit)
 
-    def __ensure_open(self):
+    def __ensure_open(self) -> None:
         if self.__closed:
             raise RuntimeError("Firepit handle is closed")
 
-    def close(self):
+    def close(self) -> None:
         if not self.__closed:
             self.__connection.close()
             self.__closed = True
 
-    def __enter__(self):
+    def __enter__(self) -> 'Firepit':
         self.__ensure_open()
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:
         self.close()
         return False
 
 
-def get_storage(path, session_id=None):
+def get_storage(path: str | os.PathLike, session_id: str | None = None) -> Firepit:
     return Firepit(path, session_id)

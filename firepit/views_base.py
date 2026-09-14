@@ -1,5 +1,7 @@
 """Sentinel-compatible base threat-intelligence views."""
 
+from duckdb import DuckDBPyConnection
+
 BASE_VIEWS = ("ThreatIntelIndicators", "ThreatIntelObjects")
 
 _INDICATOR_STRUCTURE = (
@@ -18,11 +20,11 @@ def qname(schema: str, name: str) -> str:
     return f"{qident(schema)}.{qident(name)}"
 
 
-def create_view(connection, schema: str, name: str, select: str):
+def create_view(connection: DuckDBPyConnection, schema: str, name: str, select: str) -> None:
     connection.execute(f"CREATE OR REPLACE VIEW {qname(schema, name)} AS\n{select}")
 
 
-def install_base_views(connection, public_schema: str, internal_schema: str):
+def install_base_views(connection: DuckDBPyConnection, public_schema: str, internal_schema: str) -> None:
     objects = qname(internal_schema, "objects")
 
     create_view(connection, public_schema, "ThreatIntelIndicators", f"""
